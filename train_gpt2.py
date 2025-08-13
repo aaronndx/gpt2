@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -17,8 +18,8 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         # mask, or 'bias' following the OpenAI/HF naming
-        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                             .view(1, 1, config.block_size, config.block_size))
+        self.register_buffer("bias", torch.tril(torch.ones(config.context_size, config.context_size))
+                             .view(1, 1, config.context_size, config.context_size))
     
     def forward(self, x):
         B, T, C = x.size() # B: batch size, T: sequence length, C: embedding size
@@ -30,7 +31,7 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, n_head, T, hs)
         # attention
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, n_head, T, hs) x (B, n_head, hs, T) -> (B, n_head, T, T)
         att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
         att = F.softmax(att, dim=-1)
         y = att @ v # (B, n_head, T, T) x (B, n_head, T, hs) -> (B, n_head, T, hs)
@@ -69,7 +70,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPT2Config:
-    block_size: int = 1024 # context size
+    context_size: int = 1024 # context size
     vocab_size: int = 50257 # size of vocabulary: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
     n_layer: int = 12
     n_head: int = 12
@@ -81,11 +82,27 @@ class GPT2(nn.Module):
         self.config = config
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wpe = nn.Embedding(config.context_size, config.n_embd),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+    
+    def forward(self, idx, targets=None):
+        B, T = idx.size() # B: batch size, T: sequence length
+        assert T <= self.config.context_size, "Cannot forward sequence of length %d, context size is only %d" % (T, self.config.context_size)
+        # forward the token and position embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T,)
+        pos_emb = self.transformer.wpe(pos) # positional embedding, (T, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embedding, (B, T, n_embd)
+        x = tok_emb + pos_emb
+        # forward the transformer blocks
+        for block in self.transformer.h:
+            x = block(x)
+        # forward the final layer norm and classifier
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+        return logits
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -102,7 +119,7 @@ class GPT2(nn.Module):
             'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
         }[model_type]
         config_args['vocab_size'] = 50257 # always 50,257 for GPT model checkpoints
-        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
+        config_args['context_size'] = 1024 # always 1024 for GPT model checkpoints
         # create a from-scratch initialized minGPT model
         config = GPT2Config(**config_args)
         model = GPT2(config)
