@@ -156,12 +156,20 @@ class GPT2(nn.Module):
         return model
 
 # ----------------------------------------
+# auto detect device
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = "mps"
+print(f"Using device: {device}")
+
 batch_size = 5
 max_length = 30
 
 model = GPT2.from_pretrained('gpt2')
 model.eval()
-model.to('cpu')
+model.to(device)
 print("model loaded successfully!")
 
 # prefill tokens
@@ -170,7 +178,7 @@ enc = tiktoken.get_encoding("gpt2")
 tokens = enc.encode("Hello, I'm a language model,")
 tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
 tokens = tokens.unsqueeze(0).repeat(batch_size, 1) # (5, 8)
-x = tokens.to('cpu')
+x = tokens.to(device)
 
 # generate output. x is (B, T) where B = 5, T = 8
 torch.manual_seed(42)
