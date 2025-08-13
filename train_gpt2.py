@@ -156,5 +156,42 @@ class GPT2(nn.Module):
         return model
 
 # ----------------------------------------
+batch_size = 5
+max_length = 30
+
 model = GPT2.from_pretrained('gpt2')
+model.eval()
+model.to('cpu')
 print("model loaded successfully!")
+
+# prefill tokens
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+tokens = enc.encode("Hello, I'm a language model,")
+tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
+tokens = tokens.unsqueeze(0).repeat(batch_size, 1) # (5, 8)
+x = tokens.to('cpu')
+
+# generate output. x is (B, T) where B = 5, T = 8
+torch.manual_seed(42)
+# This process calculate the entire T for each step, since we don't cache any KV.
+while x.size(1) < max_length:
+    # forward the model to get the logits
+    with torch.no_grad():
+        logits = model(x) # (B, T, vocab_size)
+        # get the last token logits
+        logits_last = logits[:, -1, :] # (B, vocab_size)
+        # get the next token probabilities
+        probs = F.softmax(logits_last, dim=-1) # (B, vocab_size)
+        # use top-k sampling of 50 (huggingface default)
+        topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1) # (B, 50)
+        # sample from the top-k probabilities
+        idx = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
+        next_token = torch.gather(topk_indices, -1, idx) # (B, 1)
+        x = torch.cat((x, next_token), dim=1) # (B, T+1)
+
+# decode the output tokens
+for i in range(batch_size):
+    output_tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(output_tokens)
+    print(f"Output {i+1}: {decoded}")
