@@ -103,7 +103,10 @@ class GPT2(nn.Module):
         # forward the final layer norm and classifier
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
-        return logits
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -196,6 +199,7 @@ def simple_eval():
         print(f"Output {i+1}: {decoded}")
 
 def simple_train():
+    device = "cpu" # override to cpu sfor now
     # get a data batch
     enc = tiktoken.get_encoding("gpt2")
     with open('input.txt', 'r') as f:
@@ -206,8 +210,16 @@ def simple_train():
     buf = torch.tensor(tokens[:B * T + 1])
     x = buf[:-1].view(B, T) # Input tokens
     y = buf[1:].view(B, T) # Labels
-    print(f"Input tokens:\n{x}")
-    print(f"Labels:\n{y}")
+
+    # get logits
+    model = GPT2(GPT2Config())
+    model.to(device)
+    logits, loss = model(x, y)
+
+    # print logits and loss
+    # For randomly initialized input, the probability of the target should be 1 / vocab_size.
+    # The actual output is 11.0043, which is close to -log(1/50257) = 10.8198.
+    print(loss)
 
 # ----------------------------------------
 # auto detect device
