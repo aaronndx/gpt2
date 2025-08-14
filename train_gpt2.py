@@ -180,7 +180,7 @@ def simple_eval():
     while x.size(1) < max_length:
         # forward the model to get the logits
         with torch.no_grad():
-            logits = model(x) # (B, T, vocab_size)
+            logits, _ = model(x) # (B, T, vocab_size)
             # get the last token logits
             logits_last = logits[:, -1, :] # (B, vocab_size)
             # get the next token probabilities
@@ -232,6 +232,7 @@ if torch.cuda.is_available():
     device = "cuda"
 elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
     device = "mps"
+device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
 print(f"Using device: {device}")
 
 simple_train()
