@@ -199,7 +199,6 @@ def simple_eval():
         print(f"Output {i+1}: {decoded}")
 
 def simple_train():
-    device = "cpu" # override to cpu sfor now
     # get a data batch
     enc = tiktoken.get_encoding("gpt2")
     with open('input.txt', 'r') as f:
@@ -208,18 +207,23 @@ def simple_train():
     tokens = enc.encode(text)
     B, T = 4, 32
     buf = torch.tensor(tokens[:B * T + 1])
+    buf = buf.to(device)
     x = buf[:-1].view(B, T) # Input tokens
     y = buf[1:].view(B, T) # Labels
 
     # get logits
     model = GPT2(GPT2Config())
     model.to(device)
-    logits, loss = model(x, y)
 
-    # print logits and loss
-    # For randomly initialized input, the probability of the target should be 1 / vocab_size.
-    # The actual output is 11.0043, which is close to -log(1/50257) = 10.8198.
-    print(loss)
+    steps = 50
+    # optimization
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for i in range(steps):
+        optimizer.zero_grad()
+        logits, loss = model(x, y)
+        loss.backward()
+        optimizer.step()
+        print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
 
 # ----------------------------------------
 # auto detect device
