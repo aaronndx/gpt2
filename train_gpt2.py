@@ -159,7 +159,7 @@ class GPT2(nn.Module):
         print(f"Loaded pre-trained model: {model_type} with {sum(p.numel() for p in model.parameters())} parameters")
         return model
 
-def simple_eval():
+def simple_eval(device):
     batch_size = 5
     max_length = 30
 
@@ -198,7 +198,7 @@ def simple_eval():
         decoded = enc.decode(output_tokens)
         print(f"Output {i+1}: {decoded}")
 
-def simple_train():
+def simple_train(device):
     # get a data batch
     enc = tiktoken.get_encoding("gpt2")
     with open('input.txt', 'r') as f:
@@ -236,4 +236,4 @@ if __name__ == "__main__":
     device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    simple_train()
+    simple_train(device)
