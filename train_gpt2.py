@@ -91,6 +91,18 @@ class GPT2(nn.Module):
 
         # sharing token <-> embedding weights
         self.transformer.wte.weight = self.lm_head.weight
+
+        # initialize weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        # layer norm is already initialized by default in PyTorch as scale = 1.0, offset = 0.0
     
     def forward(self, idx, targets=None):
         B, T = idx.size() # B: batch size, T: sequence length
