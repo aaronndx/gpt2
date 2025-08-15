@@ -206,9 +206,7 @@ class DataLoaderLite:
             self.current_position = 0 # reset for next epoch
         return x, y
 
-def simple_eval(device, input=None, model=None):
-    batch_size = 5
-    max_length = 30
+def simple_eval(device, input=None, model=None, batch_size=5, max_length=30):
     if input is None:
         input = "Hello, I'm a language model,"
 
@@ -253,8 +251,10 @@ def simple_eval(device, input=None, model=None):
         decoded = enc.decode(output_tokens)
         print(f"Output {i+1}: {decoded}")
 
-def simple_train(device, steps=50):
-    train_loader = DataLoaderLite('input.txt', B=4, T=32) # batch size 4, sequence length 32
+def simple_train(device, data=None, steps=50):
+    if data is None:
+        data = "input.txt"
+    train_loader = DataLoaderLite(data, B=4, T=32) # batch size 4, sequence length 32
 
     # get logits
     model = GPT2(GPT2Config())
@@ -283,5 +283,5 @@ if __name__ == "__main__":
     device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = simple_train(device)
-    simple_eval(device, model=model)
+    model = simple_train(device, data="input.txt", steps=10)
+    simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
