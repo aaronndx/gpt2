@@ -206,17 +206,20 @@ class DataLoaderLite:
             self.current_position = 0 # reset for next epoch
         return x, y
 
-def simple_eval(device):
+def simple_eval(device, input=None, model=None):
     batch_size = 5
     max_length = 30
+    if input is None:
+        input = "Hello, I'm a language model,"
 
-    model = GPT2.from_pretrained('gpt2')
+    if model is None:
+        model = GPT2.from_pretrained('gpt2')
     model.eval()
     model.to(device)
     print("model loaded successfully!")
     # prefill tokens
     enc = tiktoken.get_encoding("gpt2")
-    tokens = enc.encode("Hello, I'm a language model,")
+    tokens = enc.encode(input)
     tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
     tokens = tokens.unsqueeze(0).repeat(batch_size, 1) # (5, 8)
     x = tokens.to(device)
@@ -267,6 +270,7 @@ def simple_train(device, steps=50):
         loss.backward()
         optimizer.step()
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
+    return model
 
 if __name__ == "__main__":
     # ----------------------------------------
@@ -279,4 +283,5 @@ if __name__ == "__main__":
     device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    simple_train(device)
+    model = simple_train(device)
+    simple_eval(device, model=model)
