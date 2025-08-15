@@ -225,14 +225,15 @@ def simple_train():
         optimizer.step()
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
 
-# ----------------------------------------
-# auto detect device
-device = "cpu"
-if torch.cuda.is_available():
-    device = "cuda"
-elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-    device = "mps"
-device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
-print(f"Using device: {device}")
+if __name__ == "__main__":
+    # ----------------------------------------
+    # auto detect device
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = "mps"
+    device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
+    print(f"Using device: {device}")
 
-simple_train()
+    simple_train()
