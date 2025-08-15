@@ -15,6 +15,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.GPT2_SCALE_INIT = 1
         # regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -49,6 +50,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj.GPT2_SCALE_INIT = 1
     
     def forward(self, x):
         x = self.c_fc(x)
@@ -97,7 +99,10 @@ class GPT2(nn.Module):
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            std = 0.02
+            if hasattr(module, 'GPT2_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5 # apply 1 / sqrt(num_layer) to stablize residual connections (additions)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -216,8 +221,13 @@ def simple_eval(device):
     tokens = tokens.unsqueeze(0).repeat(batch_size, 1) # (5, 8)
     x = tokens.to(device)
 
+    torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(1337)
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        torch.mps.manual_seed(1337)
+
     # generate output. x is (B, T) where B = 5, T = 8
-    torch.manual_seed(42)
     # This process calculate the entire T for each step, since we don't cache any KV.
     while x.size(1) < max_length:
         # forward the model to get the logits
