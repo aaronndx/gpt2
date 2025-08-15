@@ -88,6 +88,9 @@ class GPT2(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # sharing token <-> embedding weights
+        self.transformer.wte.weight = self.lm_head.weight
     
     def forward(self, idx, targets=None):
         B, T = idx.size() # B: batch size, T: sequence length
