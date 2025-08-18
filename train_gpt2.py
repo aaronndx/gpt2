@@ -269,10 +269,39 @@ def synchronize(device):
     else:
         pass  # No synchronization needed for CPU
 
-def simple_train(device, data=None, steps=50):
+def get_training_precision(device):
+    """
+    Gets the appropriate training precision strategy according to device.
+    Returns:
+        pair: (bool, torch.dtype) for AMP flag, and AMP dtype.
+    """
+    use_amp = False
+    amp_dtype = torch.float32
+
+    if device == "cuda" and torch.cuda.is_available():
+        major, _ = torch.cuda.get_device_capability()
+        if major >= 8:
+            print("CUDA device is Ampere or newer. Using TF32.")
+            torch.set_float32_matmul_precision('high')
+        else:
+            print("CUDA device is older. Using AMP with FP16.")
+            use_amp = True
+            amp_dtype = torch.float16
+    elif device == "mps" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        print("Apple MPS device found. Using AMP with FP16.")
+        use_amp = True
+        amp_dtype = torch.float16
+    else:
+        print("No GPU found. Running on CPU with AMP using BFloat16.")
+        use_amp = True
+        amp_dtype = torch.bfloat16
+        
+    return use_amp, amp_dtype
+
+def simple_train(device, data=None, steps=50, B=4, T=32):
     if data is None:
         data = "input.txt"
-    train_loader = DataLoaderLite(data, B=4, T=32) # batch size 4, sequence length 32
+    train_loader = DataLoaderLite(data, B, T)
 
     # get logits
     model = GPT2(GPT2Config())
@@ -296,7 +325,12 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         data = "input.txt"
     train_loader = DataLoaderLite(data, B, T)
 
-    torch.set_float32_matmul_precision('high')  # set high precision for matmul
+    use_amp, amp_dtype = get_training_precision(device)
+    if use_amp:
+        print(f"Using AMP with dtype: {amp_dtype}")
+    
+    # --- Initialize GradScaler based on the configuration ---
+    scaler = torch.amp.GradScaler(enabled=(use_amp and device == 'cuda'))
 
     # get logits
     model = GPT2(GPT2Config())
@@ -309,9 +343,15 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         x, y = train_loader.next_batch() # get next batch
         x, y = x.to(device), y.to(device) # move to device
         optimizer.zero_grad()
-        logits, loss = model(x, y)
-        loss.backward()
-        optimizer.step()
+
+        # forward pass with automatic mixed precision (AMP) if enabled
+        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
+            logits, loss = model(x, y)
+        scaler.scale(loss).backward()  # scale the loss for AMP
+        scaler.step(optimizer)
+        scaler.update()  # update the scaler
+
+        # print timing and performance metrics
         synchronize(device)  # ensure all accelerator operations are complete before timing
         t1 = time.time()
         dt = (t1 - t0) * 1000  # convert to milliseconds
@@ -323,8 +363,8 @@ if __name__ == "__main__":
     # ----------------------------------------
     # auto detect device
     device = auto_pick_device()
-    device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
+    # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = simple_train(device, data="input.txt", steps=10)
+    model = efficient_train(device, data="input.txt", steps=50, B=4, T=256)
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
