@@ -296,6 +296,8 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         data = "input.txt"
     train_loader = DataLoaderLite(data, B, T)
 
+    torch.set_float32_matmul_precision('high')  # set high precision for matmul
+
     # get logits
     model = GPT2(GPT2Config())
     model.to(device)
