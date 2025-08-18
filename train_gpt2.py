@@ -313,7 +313,8 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         synchronize(device)  # ensure all accelerator operations are complete before timing
         t1 = time.time()
         dt = (t1 - t0) * 1000  # convert to milliseconds
-        print(f"Step {i+1}/{steps}, Loss: {loss.item()}, Time: {dt:.2f} ms")
+        tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)  # tokens per second
+        print(f"Step {i+1}/{steps}, Loss: {loss.item()}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
     return model
 
 if __name__ == "__main__":
