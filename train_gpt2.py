@@ -251,6 +251,24 @@ def simple_eval(device, input=None, model=None, batch_size=5, max_length=30):
         decoded = enc.decode(output_tokens)
         print(f"Output {i+1}: {decoded}")
 
+def auto_pick_device():
+    """Auto-detect the device to use for training."""
+    if torch.cuda.is_available():
+        return "cuda"
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return "mps"
+    else:
+        return "cpu"
+
+def synchronize(device):
+    """Synchronize the device to ensure all operations are complete."""
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elif device == "mps":
+        torch.mps.synchronize()
+    else:
+        pass  # No synchronization needed for CPU
+
 def simple_train(device, data=None, steps=50):
     if data is None:
         data = "input.txt"
@@ -272,14 +290,36 @@ def simple_train(device, data=None, steps=50):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
+def efficient_train(device, data=None, B=16, T=1024, steps=50):
+    import time
+    if data is None:
+        data = "input.txt"
+    train_loader = DataLoaderLite(data, B, T)
+
+    # get logits
+    model = GPT2(GPT2Config())
+    model.to(device)
+
+    # optimization
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for i in range(steps):
+        t0 = time.time()
+        x, y = train_loader.next_batch() # get next batch
+        x, y = x.to(device), y.to(device) # move to device
+        optimizer.zero_grad()
+        logits, loss = model(x, y)
+        loss.backward()
+        optimizer.step()
+        synchronize(device)  # ensure all accelerator operations are complete before timing
+        t1 = time.time()
+        dt = (t1 - t0) * 1000  # convert to milliseconds
+        print(f"Step {i+1}/{steps}, Loss: {loss.item()}, Time: {dt:.2f} ms")
+    return model
+
 if __name__ == "__main__":
     # ----------------------------------------
     # auto detect device
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = "mps"
+    device = auto_pick_device()
     device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
