@@ -335,6 +335,8 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
     # get logits
     model = GPT2(GPT2Config())
     model.to(device)
+    # compile the model for better performance with optimized python code and kernel fusion
+    model = torch.compile(model)
 
     # optimization
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
