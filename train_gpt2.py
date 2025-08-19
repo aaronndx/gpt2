@@ -336,7 +336,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
     scaler = torch.amp.GradScaler(enabled=(use_amp and device == 'cuda'))
 
     # get logits
-    model = GPT2(GPT2Config())
+    model = GPT2(GPT2Config(vocab_size=50304)) # Use nice number with power of 2 (128)
     model.to(device)
     # compile the model for better performance with optimized python code and kernel fusion
     model = torch.compile(model)
