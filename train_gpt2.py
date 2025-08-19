@@ -398,6 +398,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
             logits, loss = model(x, y)
         scaler.scale(loss).backward()  # scale the loss for AMP
+        scaler.unscale_(optimizer)  # unscale the gradients for clipping
         # gradient clipping to avoid model shock by too big gradients
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         # detemine and set the learning rate for this iteration
