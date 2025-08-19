@@ -341,9 +341,28 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
     # compile the model for better performance with optimized python code and kernel fusion
     model = torch.compile(model)
 
+    max_lr = 6e-4
+    min_lr = max_lr * 0.1
+    warmup_steps = 10
+    def get_lr(step):
+        """Calculate learning rate based on step."""
+        # 1. linear warmup
+        if step < warmup_steps:
+            return max_lr * (step + 1) / warmup_steps
+        # 2. min rate for above max steps
+        elif step > steps:
+            return min_lr
+        # 3. cosine decay
+        else:
+            decay_ratio = (step - warmup_steps) / (steps - warmup_steps)
+            assert 0 <= decay_ratio <= 1, "Decay ratio must be in [0, 1]"
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # cosine decay coefficient, 1 -> 0
+            # return the learning rate based on cosine decay
+            return min_lr + coeff * (max_lr - min_lr)
+
     # optimization
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-    for i in range(steps):
+    for step in range(steps):
         t0 = time.time()
         x, y = train_loader.next_batch() # get next batch
         x, y = x.to(device), y.to(device) # move to device
@@ -355,6 +374,10 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         scaler.scale(loss).backward()  # scale the loss for AMP
         # gradient clipping to avoid model shock by too big gradients
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # detemine and set the learning rate for this iteration
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         scaler.step(optimizer)
         scaler.update()  # update the scaler
 
@@ -363,7 +386,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         t1 = time.time()
         dt = (t1 - t0) * 1000  # convert to milliseconds
         tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)  # tokens per second
-        print(f"Step {i+1}/{steps}, Loss: {loss.item()}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
+        print(f"Step {step:4d}, Loss: {loss.item()}, lr: {lr:.4e}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
     return model
 
 if __name__ == "__main__":
