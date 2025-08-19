@@ -342,7 +342,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
     model = torch.compile(model)
 
     # optimization
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, beta=(0.9, 0.95), eps=1e-8)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     for i in range(steps):
         t0 = time.time()
         x, y = train_loader.next_batch() # get next batch
