@@ -342,7 +342,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
     model = torch.compile(model)
 
     # optimization
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, beta=(0.9, 0.95), eps=1e-8)
     for i in range(steps):
         t0 = time.time()
         x, y = train_loader.next_batch() # get next batch
@@ -353,6 +353,8 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
             logits, loss = model(x, y)
         scaler.scale(loss).backward()  # scale the loss for AMP
+        # gradient clipping to avoid model shock by too big gradients
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()  # update the scaler
 
@@ -361,7 +363,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         t1 = time.time()
         dt = (t1 - t0) * 1000  # convert to milliseconds
         tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)  # tokens per second
-        print(f"Step {i+1}/{steps}, Loss: {loss.item()}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
+        print(f"Step {i+1}/{steps}, Loss: {loss.item()}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
     return model
 
 if __name__ == "__main__":
