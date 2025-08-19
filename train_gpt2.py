@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
+import inspect
 
 # ----------------------------------------
 
@@ -181,6 +182,30 @@ class GPT2(nn.Module):
         model.load_state_dict(sd)
         print(f"Loaded pre-trained model: {model_type} with {sum(p.numel() for p in model.parameters())} parameters")
         return model
+
+    def configure_optimizers(self, device, weight_decay=0.1, learning_rate=3e-4, betas=(0.9, 0.95), eps=1e-8):
+        # Starts with all candidate parameters that requires gradients
+        params_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        # Create optim groups, and all 2D weights will be weight decayed.
+        # i.e. all weights in matmuls, embeddings have decay, but biases and layer norms do not.
+        decay_params = [p for pn, p in params_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for pn, p in params_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"Number of decayed tensors: {len(decay_params)} with {num_decay_params:,} parameters")
+        print(f"Number of non-decayed tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use fused version if available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        extra_args = dict(fused=True) if use_fused else {}
+        print(f"Using {'fused' if use_fused else 'non-fused'} AdamW optimizer")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps, **extra_args)
+        return optimizer
+
 
 class DataLoaderLite:
     def __init__(self, file, B, T):
@@ -361,7 +386,8 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
             return min_lr + coeff * (max_lr - min_lr)
 
     # optimization
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
     for step in range(steps):
         t0 = time.time()
         x, y = train_loader.next_batch() # get next batch
