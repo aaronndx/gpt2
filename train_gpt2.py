@@ -208,9 +208,11 @@ class GPT2(nn.Module):
 
 
 class DataLoaderLite:
-    def __init__(self, file, B, T):
+    def __init__(self, file, B, T, process_rank=0, num_processes=1):
         self.B = B # batch size
         self.T = T # sequence length
+        self.process_rank = process_rank
+        self.num_processes = num_processes
         self.file = file
 
         with open(file, 'r') as f:
@@ -222,16 +224,16 @@ class DataLoaderLite:
         print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
 
         # state
-        self.current_position = 0
+        self.current_position = self.B * self.T * self.process_rank # Scatter out data for different processes
     
     def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_position : self.current_position + B * T + 1]
         x = buf[:-1].view(B, T) # Input tokens
         y = buf[1:].view(B, T) # Labels
-        self.current_position += B * T
-        if self.current_position + (B * T + 1) > len(self.tokens):
-            self.current_position = 0 # reset for next epoch
+        self.current_position += B * T * self.num_processes
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank # reset for next epoch
         return x, y
 
 def simple_eval(device, input=None, model=None, batch_size=5, max_length=30):
@@ -352,6 +354,8 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
 
 def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=0):
     from torch.distributed import init_process_group, destroy_process_group
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
     import os
 
     # set up DDP (Distributed Data Parallel)
@@ -379,7 +383,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
     import time
     if data is None:
         data = "input.txt"
-    train_loader = DataLoaderLite(data, B, T)
+    train_loader = DataLoaderLite(data, B, T, process_rank=ddp_rank, num_processes=ddp_world_size)
 
     use_amp, amp_dtype = get_training_precision(device)
     if use_amp:
@@ -388,11 +392,14 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
     # --- Initialize GradScaler based on the configuration ---
     scaler = torch.amp.GradScaler(enabled=(use_amp and device == 'cuda'))
 
-    # get logits
+    # create model
     model = GPT2(GPT2Config(vocab_size=50304)) # Use nice number with power of 2 (128)
     model.to(device)
     # compile the model for better performance with optimized python code and kernel fusion
     model = torch.compile(model)
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+    raw_model = model.module if ddp else model # For configure_optimizers
 
     max_lr = 6e-4
     min_lr = max_lr * 0.1
@@ -423,7 +430,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
 
     # optimization
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-    optimizer = model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = raw_model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
     for step in range(steps):
         t0 = time.time()
         optimizer.zero_grad()
@@ -437,7 +444,14 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
                 _, loss = model(x, y)
             loss = loss / gradient_accum_steps # normalize the loss for mean-loss calculation
             loss_accum += loss.detach()
+            if ddp:
+                # only sync at last step
+                # It's the same as no_sync()
+                model.require_backward_grad_sync = (micro_step == gradient_accum_steps - 1)
             scaler.scale(loss).backward()  # scale the loss for AMP
+        if ddp:
+            # Average loss_accum across all processes
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
         scaler.unscale_(optimizer)  # unscale the gradients for clipping
         # gradient clipping to avoid model shock by too big gradients
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -452,9 +466,13 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
         synchronize(device)  # ensure all accelerator operations are complete before timing
         t1 = time.time()
         dt = (t1 - t0) * 1000  # convert to milliseconds
-        tokens_processed = train_loader.B * train_loader.T * gradient_accum_steps
+        tokens_processed = train_loader.B * train_loader.T * gradient_accum_steps * ddp_world_size
         tokens_per_sec = tokens_processed / (t1 - t0)  # tokens per second
-        print(f"Step {step:4d}, Loss: {loss_accum.item()}, lr: {lr:.4e}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
+        if master_process:
+            print(f"Step {step:4d}, Loss: {loss_accum.item()}, lr: {lr:.4e}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
+    
+    if ddp:
+        destroy_process_group()
     return model
 
 if __name__ == "__main__":
