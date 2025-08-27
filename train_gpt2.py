@@ -351,6 +351,29 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
     return model
 
 def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=0):
+    from torch.distributed import init_process_group, destroy_process_group
+    import os
+
+    # set up DDP (Distributed Data Parallel)
+    # torchrun command sets the env variables RANK, LOCAL_RANK, WORLD_RANK
+    ddp = int(os.environ.get('RANK', -1)) != -1
+    if ddp:
+        # Use ddp atm demands CUDA
+        assert torch.cuda.is_available(), "DDP only supported for CUDA for now"
+        init_process_group(backend='nccl')
+        ddp_rank = int(os.environ['RANK']) # Unique rank for this process
+        ddp_local_rank = int(os.environ['LOCAL_RANK']) # Rank of GPU on a single node
+        ddp_world_size = int(os.environ['WORLD_SIZE']) # Total number of processes running
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0 # Does logging, checkpointing, etc.
+    else:
+        # non-DDP run
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        master_process = True
+
     set_seed(1337)
 
     import time
@@ -392,10 +415,11 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
     
     gradient_accum_steps = 1
     if total_batch_size > 0:
-        assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by batch_size * max_length"
-        gradient_accum_steps = total_batch_size // (B * T)
-        print(f"total desired batch size: {total_batch_size}")
-        print(f"-> calculated gradient accumulation iterations: {gradient_accum_steps}")
+        assert total_batch_size % (B * T * ddp_world_size) == 0, "total_batch_size must be divisible by batch_size * max_length * process_count"
+        gradient_accum_steps = total_batch_size // (B * T * ddp_world_size)
+        if master_process:
+            print(f"total desired batch size: {total_batch_size}")
+            print(f"-> calculated gradient accumulation iterations: {gradient_accum_steps}")
 
     # optimization
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
