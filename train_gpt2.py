@@ -250,11 +250,7 @@ def simple_eval(device, input=None, model=None, batch_size=5, max_length=30):
     tokens = tokens.unsqueeze(0).repeat(batch_size, 1) # (5, 8)
     x = tokens.to(device)
 
-    torch.manual_seed(1337)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(1337)
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        torch.mps.manual_seed(1337)
+    set_seed(1337)
 
     # generate output. x is (B, T) where B = 5, T = 8
     # This process calculate the entire T for each step, since we don't cache any KV.
@@ -296,6 +292,13 @@ def synchronize(device):
         torch.mps.synchronize()
     else:
         pass  # No synchronization needed for CPU
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
 
 def get_training_precision(device):
     """
@@ -347,7 +350,9 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data=None, B=16, T=1024, steps=50):
+def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=0):
+    set_seed(1337)
+
     import time
     if data is None:
         data = "input.txt"
@@ -384,20 +389,31 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # cosine decay coefficient, 1 -> 0
             # return the learning rate based on cosine decay
             return min_lr + coeff * (max_lr - min_lr)
+    
+    gradient_accum_steps = 1
+    if total_batch_size > 0:
+        assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by batch_size * max_length"
+        gradient_accum_steps = total_batch_size // (B * T)
+        print(f"total desired batch size: {total_batch_size}")
+        print(f"-> calculated gradient accumulation iterations: {gradient_accum_steps}")
 
     # optimization
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
     for step in range(steps):
         t0 = time.time()
-        x, y = train_loader.next_batch() # get next batch
-        x, y = x.to(device), y.to(device) # move to device
         optimizer.zero_grad()
+        loss_accum = 0.0
 
-        # forward pass with automatic mixed precision (AMP) if enabled
-        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
-            logits, loss = model(x, y)
-        scaler.scale(loss).backward()  # scale the loss for AMP
+        for micro_step in range(gradient_accum_steps):
+            x, y = train_loader.next_batch() # get next batch
+            x, y = x.to(device), y.to(device) # move to device
+            # forward pass with automatic mixed precision (AMP) if enabled
+            with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
+                _, loss = model(x, y)
+            loss = loss / gradient_accum_steps # normalize the loss for mean-loss calculation
+            loss_accum += loss.detach()
+            scaler.scale(loss).backward()  # scale the loss for AMP
         scaler.unscale_(optimizer)  # unscale the gradients for clipping
         # gradient clipping to avoid model shock by too big gradients
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -412,8 +428,9 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50):
         synchronize(device)  # ensure all accelerator operations are complete before timing
         t1 = time.time()
         dt = (t1 - t0) * 1000  # convert to milliseconds
-        tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)  # tokens per second
-        print(f"Step {step:4d}, Loss: {loss.item()}, lr: {lr:.4e}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
+        tokens_processed = train_loader.B * train_loader.T * gradient_accum_steps
+        tokens_per_sec = tokens_processed / (t1 - t0)  # tokens per second
+        print(f"Step {step:4d}, Loss: {loss_accum.item()}, lr: {lr:.4e}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
     return model
 
 if __name__ == "__main__":
@@ -423,5 +440,5 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data="input.txt", steps=50, B=4, T=256)
+    model = efficient_train(device, data="input.txt", steps=50, B=4, T=256, total_batch_size=4*256*2) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
