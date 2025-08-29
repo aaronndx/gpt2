@@ -31,7 +31,7 @@ class FineWebDatasetProcessor:
         tokens_np_uint16 = tokens_np.astype(np.uint16)
         return tokens_np_uint16
     
-    def tokenize_and_save(self, local_dir="edu_fineweb10B", target_subset="sample-10BT", shard_size=int(1e8)):
+    def tokenize_and_save(self, local_dir="edu_fineweb10B", target_subset="sample-10BT", shard_size=int(1e8), clean_up_cache_after_downloading=False):
         """
         Load and tokenize the fineweb dataset, and split into shards of given size.
         Writes the tokenized shards to the local directory provided.
@@ -39,6 +39,7 @@ class FineWebDatasetProcessor:
         - local_dir: local directory to save the shards
         - target_subset: which subset of the dataset to load
         - shard_size: size of each shard in number of tokens. Default to 100M tokens.
+        - clean_up_cache_after_downloading: Clean up cache before data processing to save disk space.
         """
         # create the cache the local directory if it doesn't exist yet
         try:
@@ -55,6 +56,13 @@ class FineWebDatasetProcessor:
 
         # download the dataset
         ds = load_dataset("HuggingFaceFW/fineweb-edu", name=target_subset, split="train")
+
+        if clean_up_cache_after_downloading:
+            # Clean up the cache files to free up disk space before tokenization
+            # This deletes the large, intermediate Arrow files.
+            print("Cleaning up Hugging Face datasets cache to save disk space...")
+            ds.cleanup_cache_files()
+            print("Cache cleaned up.")
         
         def write_datafile(filename, tokens_np):
             # write a single shard to disk
