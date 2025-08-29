@@ -230,8 +230,10 @@ class DataLoaderLite:
         assert len(self.shards) > 0, f"no shards found for split {split}"
         if master_process:
             print(f"found {len(shards)} shards for split {split}")
-        
-        # state
+
+        self.reset()
+
+    def reset(self):
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank # Scatter out data for different processes
@@ -364,7 +366,7 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None):
+def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10):
     from torch.distributed import init_process_group, destroy_process_group
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
@@ -393,6 +395,7 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
 
     import time
     train_loader = DataLoaderLite(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
+    eval_loader = DataLoaderLite(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
 
     use_amp, amp_dtype = get_training_precision(device)
     if use_amp:
@@ -443,6 +446,26 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
     optimizer = raw_model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
     for step in range(steps):
         t0 = time.time()
+
+        if step % eval_every == 0:
+            model.eval()
+            eval_loader.reset()
+            with torch.no_grad():
+                eval_loss_accum = 0.0
+                eval_loss_steps = 20
+                for _ in range(eval_loss_steps):
+                    x, y = eval_loader.next_batch()
+                    x, y = x.to(device), y.to(device)
+                    with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
+                        _, loss = model(x, y)
+                    loss = loss / eval_loss_steps
+                    eval_loss_accum += loss.detach()
+            if ddp:
+                dist.all_reduce(eval_loss_accum, op=dist.ReduceOp.AVG)
+            if master_process:
+                print(f"Validation loss: {eval_loss_accum.item():.4f}")
+
+        model.train()
         optimizer.zero_grad()
         loss_accum = 0.0
 
