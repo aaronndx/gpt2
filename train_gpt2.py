@@ -5,6 +5,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
 import inspect
+import numpy as np
+import os
 
 # ----------------------------------------
 
@@ -206,24 +208,32 @@ class GPT2(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps, **extra_args)
         return optimizer
 
+def load_tokens(filename):
+    npt = np.load(filename)
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
 
 class DataLoaderLite:
-    def __init__(self, file, B, T, process_rank=0, num_processes=1):
+    def __init__(self, dir, B, T, process_rank=0, num_processes=1, split='val', master_process=True):
         self.B = B # batch size
         self.T = T # sequence length
         self.process_rank = process_rank
         self.num_processes = num_processes
-        self.file = file
+        self.dir = dir
+        assert split in {'train', 'val'}
 
-        with open(file, 'r') as f:
-            text = f.read()
-        enc = tiktoken.get_encoding("gpt2")
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-        print(f"Loaded {len(self.tokens)} tokens from {file}")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
-
+        shards = os.listdir(dir)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(dir, s) for s in shards]
+        self.shards = shards
+        assert len(self.shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for split {split}")
+        
         # state
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank # Scatter out data for different processes
     
     def next_batch(self):
@@ -233,6 +243,8 @@ class DataLoaderLite:
         y = buf[1:].view(B, T) # Labels
         self.current_position += B * T * self.num_processes
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank # reset for next epoch
         return x, y
 
@@ -352,11 +364,10 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=0):
+def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None):
     from torch.distributed import init_process_group, destroy_process_group
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
-    import os
 
     # set up DDP (Distributed Data Parallel)
     # torchrun command sets the env variables RANK, LOCAL_RANK, WORLD_RANK
@@ -381,9 +392,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
     set_seed(1337)
 
     import time
-    if data is None:
-        data = "input.txt"
-    train_loader = DataLoaderLite(data, B, T, process_rank=ddp_rank, num_processes=ddp_world_size)
+    train_loader = DataLoaderLite(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
 
     use_amp, amp_dtype = get_training_precision(device)
     if use_amp:
@@ -403,7 +412,8 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
 
     max_lr = 6e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 10
+    warmup_steps = 375e6 / total_batch_size # GPT-3 warm-up is 375M tokens
+
     def get_lr(step):
         """Calculate learning rate based on step."""
         # 1. linear warmup
@@ -421,7 +431,7 @@ def efficient_train(device, data=None, B=16, T=1024, steps=50, total_batch_size=
             return min_lr + coeff * (max_lr - min_lr)
     
     gradient_accum_steps = 1
-    if total_batch_size > 0:
+    if total_batch_size is not None:
         assert total_batch_size % (B * T * ddp_world_size) == 0, "total_batch_size must be divisible by batch_size * max_length * process_count"
         gradient_accum_steps = total_batch_size // (B * T * ddp_world_size)
         if master_process:
@@ -482,5 +492,5 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data="input.txt", steps=50, B=4, T=256, total_batch_size=4*256*2) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
