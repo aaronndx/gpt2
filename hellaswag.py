@@ -37,6 +37,35 @@ class HellaSwagEval:
 
     The validation set of HellaSwag has a total of 10,042 examples.
     """
+    class _LiveLogger:
+        """
+        A simple logger for printing multi-line text that overwrites itself.
+        Useful for displaying live stats in a terminal without cluttering the output.
+        """
+        def __init__(self):
+            self.last_lines_printed = 0
+        
+        def reset(self):
+            self.last_lines_printed = 0
+
+        def log(self, text_to_print):
+            # Move the cursor up to overwrite the previous output
+            for _ in range(self.last_lines_printed):
+                # \033[A is the ANSI code to move the cursor up one line
+                print('\033[A', end='')
+
+            # Split the new text into lines
+            lines = text_to_print.split('\n')
+            
+            # Print each new line, clearing it first to remove old characters
+            for line in lines:
+                # \r moves to the beginning of the line
+                # \033[K clears from the cursor to the end of the line
+                print(f"\r\033[K{line}")
+
+            # Remember how many lines we just printed for the next update
+            self.last_lines_printed = len(lines)
+
     def __init__(self):
         try:
             self.data_cache_dir = os.path.join(os.path.dirname(__file__), "hellaswag")
@@ -49,6 +78,7 @@ class HellaSwagEval:
             "test": "https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_test.jsonl",
         }
         self.tokenizer = tiktoken.get_encoding("gpt2")
+        self.logger = self._LiveLogger()
     
     def _download(self, split):
         """Downloads HellaSwag to cache"""
@@ -152,6 +182,7 @@ class HellaSwagEval:
         iterable = self._iterate_examples("val", rank, world_size)
         if rank == 0:
             iterable = tqdm(iterable, desc="Evaluating with HellaSwag")
+            self.logger.reset()
 
         for example in iterable:
             data, tokens, mask, label = self._render_example(example)
@@ -207,19 +238,25 @@ class HellaSwagEval:
 
             if rank == 0:
                 acc_norm = num_correct_norm_global / num_total_global
-                acc = num_correct_global / num_total_global
-                print("\n--- HellaSwag Final DDP Results ---")
-                print(f"Total Examples: {num_total_global}")
-                print(f"Accuracy (Normalized Loss): {acc_norm:.4f} ({num_correct_norm_global}/{num_total_global})")
-                print(f"Accuracy (Summed Loss): {acc:.4f} ({num_correct_global}/{num_total_global})")
+                acc = num_correct_global / num_total_global # Not used since it's biased towards shorter answer
+
+                log_text = (
+                    "--- HellaSwag Final DDP Results ---\n"
+                    f"Total Examples: {num_total_global}\n"
+                    f"Accuracy: {acc_norm:.4f} ({num_correct_norm_global}/{num_total_global})\n"
+                )
+                self.logger.log(log_text)
         
             if ddp:
                 dist.barrier()
+
+        return acc_norm, num_correct_norm_global, num_total_global
     
     def evaluate(self, model, device, compile=False, print_first=10):
-        self.evaluate_ddp(model=model, device=device, compile=compile, print_first=print_first, rank=0, world_size=1)
+        return self.evaluate_ddp(model=model, device=device, compile=compile, print_first=print_first, rank=0, world_size=1)
 
 if __name__ == "__main__":
     eval = HellaSwagEval()
     model = GPT2LMHeadModel.from_pretrained("gpt2")
-    eval.evaluate(model=model, device="cpu", compile=True)
+    final_acc_norm, _, _ = eval.evaluate(model=model, device="cpu", compile=True)
+    print(f"Final acc norm: {final_acc_norm}")
