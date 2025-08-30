@@ -25,8 +25,8 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         # mask, or 'bias' following the OpenAI/HF naming
-        self.register_buffer("bias", torch.tril(torch.ones(config.context_size, config.context_size))
-                             .view(1, 1, config.context_size, config.context_size))
+        # self.register_buffer("bias", torch.tril(torch.ones(config.context_size, config.context_size))
+        #                      .view(1, 1, config.context_size, config.context_size))
     
     def forward(self, x):
         B, T, C = x.size() # B: batch size, T: sequence length, C: embedding size
