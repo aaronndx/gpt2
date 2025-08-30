@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import math
+import random
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -311,11 +312,70 @@ def synchronize(device):
         pass  # No synchronization needed for CPU
 
 def set_seed(seed):
+    """
+    Sets the seed for all major sources of randomness to ensure reproducibility.
+    This includes Python's random module, NumPy, and PyTorch for CPU, CUDA, and MPS.
+    Note that this sets rng to starting point, so should not be called if restoring rng state is needed.
+    
+    Args:
+        seed (int): The integer value to use as the seed.
+    """
+    # Set the seed for Python's built-in random module
+    random.seed(seed)
+    
+    # Set the seed for NumPy
+    np.random.seed(seed)
+    
+    # Set the seed for PyTorch on CPU
     torch.manual_seed(seed)
+    
+    # Set the seed for PyTorch on CUDA (if available)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+        # The following two lines are often used to ensure deterministic behavior
+        # but can impact performance. Use them if you need strict reproducibility.
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
+        
+    # Set the seed for PyTorch on MPS (Apple Silicon GPU, if available)
     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         torch.mps.manual_seed(seed)
+
+def save_rng_state(device_type):
+    """
+    Saves the current state of all random number generators.
+    
+    Args:
+        device_type (str): The device type ('cuda', 'cpu', 'mps').
+    
+    Returns:
+        dict: A dictionary containing the RNG states.
+    """
+    rng_state = {
+        'py_rng_state': random.getstate(),
+        'np_rng_state': np.random.get_state(),
+        'torch_rng_state': torch.get_rng_state(),
+    }
+    if device_type == 'cuda':
+        rng_state['cuda_rng_state'] = torch.cuda.get_rng_state()
+    # Note: torch.mps.get_rng_state() is not yet implemented as of PyTorch 2.x
+    return rng_state
+
+def restore_rng_state(rng_state, device_type):
+    """
+    Restores the state of all random number generators from a saved state.
+    
+    Args:
+        rng_state (dict): A dictionary containing the RNG states.
+        device_type (str): The device type ('cuda', 'cpu', 'mps').
+    """
+    random.setstate(rng_state['py_rng_state'])
+    np.random.set_state(rng_state['np_rng_state'])
+    torch.set_rng_state(rng_state['torch_rng_state'])
+    if device_type == 'cuda' and 'cuda_rng_state' in rng_state:
+        torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
+    # Note: torch.mps.set_rng_state() is not yet implemented
 
 def get_training_precision(device):
     """
@@ -505,6 +565,7 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
                             'step': step,
                             'val_loss': eval_loss_accum.item(),
                             'scaler': scaler.state_dict(),
+                            'rng_state': save_rng_state(device)
                         }
                         torch.save(checkpoint, ckpt_path)
                         print(f"Saved checkpoint {ckpt_name} to {ckpt_path}")
