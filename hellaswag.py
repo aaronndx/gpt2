@@ -9,6 +9,8 @@ from torch.nn import functional as F
 from torch import distributed as dist
 from transformers import GPT2LMHeadModel
 import itertools
+import sys
+from IPython.display import display, clear_output
 
 class HellaSwagEval:
     """
@@ -37,34 +39,42 @@ class HellaSwagEval:
 
     The validation set of HellaSwag has a total of 10,042 examples.
     """
+
     class _LiveLogger:
         """
-        A simple logger for printing multi-line text that overwrites itself.
-        Useful for displaying live stats in a terminal without cluttering the output.
+        A universal logger that updates text in-place.
+        It automatically detects if it's in a notebook (Colab, Jupyter)
+        or a standard terminal and uses the appropriate method.
         """
         def __init__(self):
             self.last_lines_printed = 0
-        
+            
+            # Check if we are in a notebook environment
+            self.is_notebook = 'ipykernel' in sys.modules
+            
+            # In a notebook, we might need a handle for displaying things
+            if self.is_notebook:
+                self.display_handle = display("Initializing HellaSwag Logger...", display_id=True)
+
         def reset(self):
             self.last_lines_printed = 0
 
         def log(self, text_to_print):
-            # Move the cursor up to overwrite the previous output
-            for _ in range(self.last_lines_printed):
-                # \033[A is the ANSI code to move the cursor up one line
-                print('\033[A', end='')
+            if self.is_notebook and self.display_handle:
+                # --- Notebook Method ---
+                self.handle.update(text_to_print)
+            else:
+                # --- Terminal Method ---
+                # Move cursor up to overwrite previous lines
+                for _ in range(self.last_lines_printed):
+                    print('\033[A', end='')
 
-            # Split the new text into lines
-            lines = text_to_print.split('\n')
-            
-            # Print each new line, clearing it first to remove old characters
-            for line in lines:
-                # \r moves to the beginning of the line
-                # \033[K clears from the cursor to the end of the line
-                print(f"\r\033[K{line}")
-
-            # Remember how many lines we just printed for the next update
-            self.last_lines_printed = len(lines)
+                # Print new lines, clearing each one
+                lines = text_to_print.split('\n')
+                for line in lines:
+                    print(f"\r\033[K{line}")
+                
+                self.last_lines_printed = len(lines)
 
     def __init__(self):
         try:
