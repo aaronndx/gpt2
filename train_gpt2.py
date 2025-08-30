@@ -11,6 +11,7 @@ import inspect
 import numpy as np
 import os
 from hellaswag import HellaSwagEval
+from data_loader_lite import DataLoaderDisk
 
 # ----------------------------------------
 
@@ -212,48 +213,6 @@ class GPT2(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps, **extra_args)
         return optimizer
 
-def load_tokens(filename):
-    npt = np.load(filename)
-    ptt = torch.tensor(npt, dtype=torch.long)
-    return ptt
-
-class DataLoaderLite:
-    def __init__(self, dir, B, T, process_rank=0, num_processes=1, split='val', master_process=True):
-        self.B = B # batch size
-        self.T = T # sequence length
-        self.process_rank = process_rank
-        self.num_processes = num_processes
-        self.dir = dir
-        assert split in {'train', 'val'}
-
-        shards = os.listdir(dir)
-        shards = [s for s in shards if split in s]
-        shards = sorted(shards)
-        shards = [os.path.join(dir, s) for s in shards]
-        self.shards = shards
-        assert len(self.shards) > 0, f"no shards found for split {split}"
-        if master_process:
-            print(f"found {len(shards)} shards for split {split}")
-
-        self.reset()
-
-    def reset(self):
-        self.current_shard = 0
-        self.tokens = load_tokens(self.shards[self.current_shard])
-        self.current_position = self.B * self.T * self.process_rank # Scatter out data for different processes
-    
-    def next_batch(self):
-        B, T = self.B, self.T
-        buf = self.tokens[self.current_position : self.current_position + B * T + 1]
-        x = buf[:-1].view(B, T) # Input tokens
-        y = buf[1:].view(B, T) # Labels
-        self.current_position += B * T * self.num_processes
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
-            self.tokens = load_tokens(self.shards[self.current_shard])
-            self.current_position = self.B * self.T * self.process_rank # reset for next epoch
-        return x, y
-
 def simple_eval(device, input=None, model=None, batch_size=5, max_length=30):
     if input is None:
         input = "Hello, I'm a language model,"
@@ -411,7 +370,7 @@ def get_training_precision(device):
 def simple_train(device, data=None, steps=50, B=4, T=32):
     if data is None:
         data = "input.txt"
-    train_loader = DataLoaderLite(data, B, T)
+    train_loader = DataLoaderDisk(data, B, T)
 
     # get logits
     model = GPT2(GPT2Config())
@@ -466,9 +425,8 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
     if eval_with_hellaswag:
         hellaswag_eval = HellaSwagEval()
 
-    import time
-    train_loader = DataLoaderLite(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
-    eval_loader = DataLoaderLite(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
+    train_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
+    eval_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
 
     use_amp, amp_dtype = get_training_precision(device)
     if use_amp:
@@ -638,5 +596,5 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=True) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=False) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
