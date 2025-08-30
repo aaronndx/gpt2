@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import math
 import random
+import time
+from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -432,6 +434,9 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
 
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_name = f"run_{timestamp}"
+
     # if compile and eval_with_hellaswag:
     #     print(f"Hellaswag eval is unavailable at compiled mode. Turning off")
     #     eval_with_hellaswag = False
@@ -484,6 +489,7 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
 
     if master_process:
         if log_dir is not None:
+            log_dir = os.path.join(log_dir, run_name)
             os.makedirs(log_dir, exist_ok=True)
             log_file = os.path.join(log_dir, f"log.txt")
             with open(log_file, "w") as f: # clear the file
@@ -556,7 +562,7 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
                     with open(log_file, "a") as f:
                         f.write(f"{step} eval {eval_loss_accum.item():.4f}\n")
                     if step > 0 and (step % save_checkpoint_every == 0 or last_step):
-                        ckpt_name = f"model_ckpt_{step:05d}.pt"
+                        ckpt_name = f"{run_name}_ckpt_{step:05d}.pt"
                         ckpt_path = os.path.join(log_dir, ckpt_name)
                         checkpoint = {
                             'model': raw_model.state_dict(),
