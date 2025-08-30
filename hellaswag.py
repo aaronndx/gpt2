@@ -62,7 +62,7 @@ class HellaSwagEval:
         def log(self, text_to_print):
             if self.is_notebook and self.display_handle:
                 # --- Notebook Method ---
-                self.handle.update(text_to_print)
+                self.display_handle.update(text_to_print)
             else:
                 # --- Terminal Method ---
                 # Move cursor up to overwrite previous lines
