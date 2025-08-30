@@ -7,6 +7,7 @@ import tiktoken
 import inspect
 import numpy as np
 import os
+from hellaswag import HellaSwagEval
 
 # ----------------------------------------
 
@@ -366,21 +367,26 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10):
+def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, log_dir=None, eval_with_hellaswag=False, compile=False):
     from torch.distributed import init_process_group, destroy_process_group
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
 
+    # if compile and eval_with_hellaswag:
+    #     print(f"Hellaswag eval is unavailable at compiled mode. Turning off")
+    #     eval_with_hellaswag = False
+
     # set up DDP (Distributed Data Parallel)
     # torchrun command sets the env variables RANK, LOCAL_RANK, WORLD_RANK
-    ddp = int(os.environ.get('RANK', -1)) != -1
+    # 
+    ddp = dist.is_initialized()
     if ddp:
         # Use ddp atm demands CUDA
         assert torch.cuda.is_available(), "DDP only supported for CUDA for now"
         init_process_group(backend='nccl')
-        ddp_rank = int(os.environ['RANK']) # Unique rank for this process
+        ddp_rank = dist.get_rank() # Unique rank for this process
         ddp_local_rank = int(os.environ['LOCAL_RANK']) # Rank of GPU on a single node
-        ddp_world_size = int(os.environ['WORLD_SIZE']) # Total number of processes running
+        ddp_world_size = dist.get_world_size() # Total number of processes running
         device = f'cuda:{ddp_local_rank}'
         torch.cuda.set_device(device)
         master_process = ddp_rank == 0 # Does logging, checkpointing, etc.
@@ -392,6 +398,9 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
         master_process = True
 
     set_seed(1337)
+
+    if eval_with_hellaswag:
+        hellaswag_eval = HellaSwagEval()
 
     import time
     train_loader = DataLoaderLite(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
@@ -407,10 +416,11 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
     # create model
     model = GPT2(GPT2Config(vocab_size=50304)) # Use nice number with power of 2 (128)
     model.to(device)
-    # compile the model for better performance with optimized python code and kernel fusion
-    model = torch.compile(model)
     if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
+        model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=False)
+    # compile the model for better performance with optimized python code and kernel fusion
+    if compile:
+        model = torch.compile(model)
     raw_model = model.module if ddp else model # For configure_optimizers
 
     max_lr = 6e-4
@@ -444,10 +454,20 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
     # optimization
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = raw_model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
+
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f"log.txt")
+        with open(log_file, "w") as f: # clear the file
+            pass
+
     for step in range(steps):
         t0 = time.time()
+        last_step = step == steps - 1
+        eval_step = step % eval_every == 0 or last_step
 
-        if step % eval_every == 0:
+        # eval using evaluation dataset
+        if eval_step:
             model.eval()
             eval_loader.reset()
             with torch.no_grad():
@@ -464,6 +484,10 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
                 dist.all_reduce(eval_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"Validation loss: {eval_loss_accum.item():.4f}")
+        
+        # eval using hellaswag
+        if eval_with_hellaswag and eval_step:
+            hellaswag_eval.evaluate_ddp(model=model, device=device, rank=ddp_rank, world_size=ddp_world_size, compile=False)
 
         model.train()
         optimizer.zero_grad()
@@ -503,7 +527,10 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
         tokens_per_sec = tokens_processed / (t1 - t0)  # tokens per second
         if master_process:
             print(f"Step {step:4d}, Loss: {loss_accum.item()}, lr: {lr:.4e}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
-    
+            if log_dir is not None:
+                with open(log_file, "w") as f:
+                    f.write(f"{step} train {loss_accum.item():.6f}\n")
+
     if ddp:
         destroy_process_group()
     return model
@@ -515,5 +542,5 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=True) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
