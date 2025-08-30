@@ -586,15 +586,15 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
         for micro_step in range(gradient_accum_steps):
             x, y = train_loader.next_batch() # get next batch
             x, y = x.to(device), y.to(device) # move to device
+            if ddp:
+                # only sync at last step
+                # It's the same as no_sync()
+                model.require_backward_grad_sync = (micro_step == gradient_accum_steps - 1)
             # forward pass with automatic mixed precision (AMP) if enabled
             with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
                 _, loss = model(x, y)
             loss = loss / gradient_accum_steps # normalize the loss for mean-loss calculation
             loss_accum += loss.detach()
-            if ddp:
-                # only sync at last step
-                # It's the same as no_sync()
-                model.require_backward_grad_sync = (micro_step == gradient_accum_steps - 1)
             scaler.scale(loss).backward()  # scale the loss for AMP
         if ddp:
             # Average loss_accum across all processes
