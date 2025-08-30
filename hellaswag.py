@@ -6,7 +6,9 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch import distributed as dist
 from transformers import GPT2LMHeadModel
+import itertools
 
 class HellaSwagEval:
     """
@@ -111,32 +113,55 @@ class HellaSwagEval:
         
         return data, tokens, mask, label
     
-    def _iterate_examples(self, split):
+    def _iterate_examples(self, split, rank=0, world_size=1):
         # there are 10,042 examples in total in val
-        self._download(split)
+        if rank == 0:
+            self._download(split)
+        # Make sure all process read after download
+        if dist.is_initialized():
+            dist.barrier()
+
         with open(os.path.join(self.data_cache_dir, f"hellaswag_{split}.jsonl"), "r") as f:
-            for line in f:
+            num_lines = sum(1 for _ in f)
+        # Calculate start and end for current rank (proc)
+        lines_per_rank = num_lines // world_size
+        start_idx = rank * lines_per_rank
+        end_idx = (rank + 1) * lines_per_rank if rank + 1 != world_size else num_lines # last rank reads until end
+        
+        with open(os.path.join(self.data_cache_dir, f"hellaswag_{split}.jsonl"), "r") as f:
+            line_iterator = itertools.islice(f, start_idx, end_idx)
+            for line in line_iterator:
                 example = json.loads(line)
                 yield example
     
     @torch.no_grad()
-    def evaluate(self, model_type, device, compile=True, print_first=10):
+    def evaluate_ddp(self, model, device, rank, world_size, compile=False, print_first=10):
+        ddp = dist.is_initialized()
+
         torch.set_float32_matmul_precision('high') # tf32
-        model = GPT2LMHeadModel.from_pretrained(model_type)
         model.to(device)
         if compile:
             model = torch.compile(model)
         model.eval()
         
-        num_correct_norm = 0
-        num_correct = 0
-        num_total = 0
-        for example in self._iterate_examples("val"):
+        num_correct_norm_local = 0
+        num_correct_local = 0
+        num_total_local = 0
+
+        # Print only for master process
+        iterable = self._iterate_examples("val", rank, world_size)
+        if rank == 0:
+            iterable = tqdm(iterable, desc="Evaluating with HellaSwag")
+
+        for example in iterable:
             data, tokens, mask, label = self._render_example(example)
             tokens = tokens.to(device) # (4, T)
             mask = mask.to(device) # (4, T)
 
-            logits = model(tokens).logits # (4, T, Emb)
+            try:
+                logits = model(tokens).logits # (4, T, Emb), pretrained model
+            except AttributeError:
+                logits, _ = model(tokens) # (4, T, Emb), self-defined model
             # evaluate the autoregressive loss at all positions
             shift_logits = (logits[..., :-1, :]).contiguous() # Slice off the last step since no targets for it
             shift_tokens = (tokens[..., 1:]).contiguous() # Targets
@@ -155,20 +180,46 @@ class HellaSwagEval:
             pred_norm = avg_loss.argmin().item()
 
             # accumulate stats
-            num_total += 1
-            num_correct += int(pred == label)
-            num_correct_norm += int(pred_norm == label)
-            print(f"{num_total} acc_norm: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}")
+            num_total_local += 1
+            num_correct_local += int(pred == label)
+            num_correct_norm_local += int(pred_norm == label)
 
             # DEBUG: pretty print a few examples, and the losses in each case
-            if num_total < print_first:
+            if rank == 0 and num_total_local < print_first:
                 print("---")
                 print(f"Context:\n {example['ctx']}")
                 print(f"Endings:")
                 for i, end in enumerate(example["endings"]):
                     print(f"{i} (loss: {avg_loss[i].item():.4f}), {end}")
                 print(f"predicted: {pred_norm}, actual: {label}")
+            
+            # Aggregate DDP results
+            if ddp:
+                local_results = torch.tensor([num_correct_local, num_correct_norm_local, num_total_local], dtype=torch.long, device=device)
+                dist.all_reduce(local_results, op=dist.ReduceOp.SUM)
+                num_correct_global = local_results[0].item()
+                num_correct_norm_global = local_results[1].item()
+                num_total_global = local_results[2].item()
+            else:
+                num_correct_global = num_correct_local
+                num_correct_norm_global = num_correct_norm_local
+                num_total_global = num_total_local
+
+            if rank == 0:
+                acc_norm = num_correct_norm_global / num_total_global
+                acc = num_correct_global / num_total_global
+                print("\n--- HellaSwag Final DDP Results ---")
+                print(f"Total Examples: {num_total_global}")
+                print(f"Accuracy (Normalized Loss): {acc_norm:.4f} ({num_correct_norm_global}/{num_total_global})")
+                print(f"Accuracy (Summed Loss): {acc:.4f} ({num_correct_global}/{num_total_global})")
+        
+            if ddp:
+                dist.barrier()
+    
+    def evaluate(self, model, device, compile=False, print_first=10):
+        self.evaluate_ddp(model=model, device=device, compile=compile, print_first=print_first, rank=0, world_size=1)
 
 if __name__ == "__main__":
     eval = HellaSwagEval()
-    eval.evaluate(model_type="gpt2", device="cpu")
+    model = GPT2LMHeadModel.from_pretrained("gpt2")
+    eval.evaluate(model=model, device="cpu", compile=True)
