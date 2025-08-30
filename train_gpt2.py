@@ -367,7 +367,7 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, log_dir=None, eval_with_hellaswag=False, compile=False):
+def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, save_checkpoint_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
@@ -378,7 +378,6 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
 
     # set up DDP (Distributed Data Parallel)
     # torchrun command sets the env variables RANK, LOCAL_RANK, WORLD_RANK
-    # 
     ddp = dist.is_initialized()
     if ddp:
         # Use ddp atm demands CUDA
@@ -423,9 +422,24 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
         model = torch.compile(model)
     raw_model = model.module if ddp else model # For configure_optimizers
 
-    max_lr = 6e-4
+    if master_process:
+        if log_dir is not None:
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, f"log.txt")
+            with open(log_file, "w") as f: # clear the file
+                pass
+        else:
+            print("No log directory provided. Logs and checkpoints will not be saved.")
+
+    max_lr = 6e-4 * (3 if fast_learning else 1)
     min_lr = max_lr * 0.1
     warmup_steps = 375e6 / total_batch_size # GPT-3 warm-up is 375M tokens
+    if master_process:
+        param_log = f"max_lr: {max_lr}, min_lr: {min_lr}, steps: {steps}, warmup_steps: {warmup_steps}"
+        print(param_log)
+        if log_dir is not None:
+            with open(log_file, "a") as f:
+                f.write(param_log)
 
     def get_lr(step):
         """Calculate learning rate based on step."""
@@ -455,12 +469,6 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = raw_model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
 
-    if log_dir is not None:
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"log.txt")
-        with open(log_file, "w") as f: # clear the file
-            pass
-
     for step in range(steps):
         t0 = time.time()
         last_step = step == steps - 1
@@ -484,10 +492,31 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
                 dist.all_reduce(eval_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"Validation loss: {eval_loss_accum.item():.4f}")
+                if log_dir is not None:
+                    with open(log_file, "a") as f:
+                        f.write(f"{step} eval {eval_loss_accum.item():.4f}\n")
+                    if step > 0 and (step % save_checkpoint_every == 0 or last_step):
+                        ckpt_name = f"model_ckpt_{step:05d}.pt"
+                        ckpt_path = os.path.join(log_dir, ckpt_name)
+                        checkpoint = {
+                            'model': raw_model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'config': raw_model.config,
+                            'step': step,
+                            'val_loss': eval_loss_accum.item(),
+                            'scaler': scaler.state_dict(),
+                        }
+                        torch.save(checkpoint, ckpt_path)
+                        print(f"Saved checkpoint {ckpt_name} to {ckpt_path}")
         
         # eval using hellaswag
         if eval_with_hellaswag and eval_step:
-            hellaswag_eval.evaluate_ddp(model=model, device=device, rank=ddp_rank, world_size=ddp_world_size, compile=False)
+            acc_norm, num_correct, num_total = hellaswag_eval.evaluate_ddp(model=model, device=device, rank=ddp_rank, world_size=ddp_world_size, compile=False, print_first=0)
+            if master_process:
+                print(f"HellaSwag accuracy: {num_correct}/{num_total}={acc_norm:.4f}")
+                if log_dir is not None:
+                    with open(log_file, "a") as f:
+                        f.write(f"{step} hella {acc_norm:.4f}\n")
 
         model.train()
         optimizer.zero_grad()
@@ -528,8 +557,8 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
         if master_process:
             print(f"Step {step:4d}, Loss: {loss_accum.item()}, lr: {lr:.4e}, Norm: {norm:.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
             if log_dir is not None:
-                with open(log_file, "w") as f:
-                    f.write(f"{step} train {loss_accum.item():.6f}\n")
+                with open(log_file, "a") as f:
+                    f.write(f"{step} train {loss_accum.item():.4f}\n")
 
     if ddp:
         destroy_process_group()
