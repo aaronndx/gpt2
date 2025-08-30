@@ -11,7 +11,7 @@ import inspect
 import numpy as np
 import os
 from hellaswag import HellaSwagEval
-from data_loader_lite import DataLoaderDisk
+from data_loader_lite import DataLoaderDisk, DataLoaderHuggingFace
 
 # ----------------------------------------
 
@@ -388,7 +388,7 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, save_checkpoint_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
+def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, save_checkpoint_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
@@ -425,8 +425,21 @@ def efficient_train(device, data_dir, B=16, T=1024, steps=50, total_batch_size=N
     if eval_with_hellaswag:
         hellaswag_eval = HellaSwagEval()
 
-    train_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
-    eval_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
+    if data_dir is not None and data_repo_id is not None:
+        raise ValueError("Please provide either data_dir or repo_id, not both.")
+
+    if data_dir is not None:
+        # Load from local disk
+        if master_process: print(f"Loading data from local directory: {data_dir}")
+        train_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
+        eval_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
+    elif data_repo_id is not None:
+        # Load from Hugging Face Hub
+        if master_process: print(f"Loading data from Hugging Face repo: {data_repo_id}")
+        train_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
+        eval_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
+    else:
+        raise ValueError("Please provide a data source via data_dir or repo_id.")
 
     use_amp, amp_dtype = get_training_precision(device)
     if use_amp:

@@ -96,6 +96,7 @@ class DataLoaderDisk(DataLoaderLite):
 class DataLoaderHuggingFace(DataLoaderLite):
     """
     Streams tokenized data shards from a Hugging Face Hub repository.
+    To use this, needs to first login to hugging face by `huggingface-cli login`
     """
     def __init__(self, repo_id, B, T, process_rank=0, num_processes=1, split='val', master_process=True):
         super().__init__(B, T, process_rank, num_processes, split, master_process)
@@ -103,8 +104,8 @@ class DataLoaderHuggingFace(DataLoaderLite):
         
         # Programmatically generate the shard filenames
         if self.split == 'train':
-            # Assumes 100 training shards named edufineweb_train_000000.npy to edufineweb_train_000099.npy
-            self.shards = [f"edufineweb_train_{i:06d}.npy" for i in range(100)]
+            # Assumes 99 training shards named edufineweb_train_000001.npy to edufineweb_train_000099.npy
+            self.shards = [f"edufineweb_train_{i:06d}.npy" for i in range(1, 100)]
         else:  # 'val'
             self.shards = ["edufineweb_val_000000.npy"]
 
