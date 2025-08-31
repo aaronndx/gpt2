@@ -350,7 +350,7 @@ def restore_rng_state(rng_state, device_type):
         torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
     # Note: torch.mps.set_rng_state() is not yet implemented
 
-def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None, ckpt_dir=None, rank=0, master_process=True, strip_ddp_prefix=False):
+def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None, ckpt_dir=None, rank=0, master_process=True, strip_compile_prefix=True):
     """
     Loads a training checkpoint from either the Hugging Face Hub or a local directory.
 
@@ -397,8 +397,8 @@ def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None,
     if 'model' in checkpoint:
         print("Restoring model state...")
         state_dict = checkpoint['model']
-        if strip_ddp_prefix:
-            # This handles cases where the model was saved with DDP wrapping, but wants to load without DDP
+        if strip_compile_prefix:
+            # This handles cases where the model was saved with torch.compile(), but wants to load without compilation
             unwanted_prefix = '_orig_mod.'
             for k, v in list(state_dict.items()):
                 if k.startswith(unwanted_prefix):
@@ -524,12 +524,6 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, cont
     config = GPT2Config(vocab_size=50304, context_size=context_size) # For vocab_size, use nice number with power of 2 (128)
     model = GPT2(config)
     model.to(device)
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=False)
-    # compile the model for better performance with optimized python code and kernel fusion
-    if compile:
-        model = torch.compile(model)
-    raw_model = model.module if ddp else model # For configure_optimizers
 
     if master_process:
         if log_dir is not None:
@@ -583,12 +577,20 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, cont
 
     # optimization
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-    optimizer = raw_model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
 
     start_step = 0
     if (restore_ckpt_dir or restore_repo_id) and restore_from_ckpt_filename:
-        ckpt_meta = restore_checkpoint(restore_from_ckpt_filename, raw_model, optimizer, scaler, device, repo_id=restore_repo_id, ckpt_dir=restore_ckpt_dir, rank=ddp_rank, master_process=master_process)
+        ckpt_meta = restore_checkpoint(restore_from_ckpt_filename, model, optimizer, scaler, device, repo_id=restore_repo_id, ckpt_dir=restore_ckpt_dir, rank=ddp_rank, master_process=master_process)
         start_step = ckpt_meta['step']
+    
+    # DDP and compile should happen after restoring checkpoint
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=False)
+    # compile the model for better performance with optimized python code and kernel fusion
+    if compile:
+        model = torch.compile(model)
+    raw_model = model.module if ddp else model # For configure_optimizers
     
     if data_dir is not None and data_repo_id is not None:
         raise ValueError("Please provide either data_dir or repo_id, not both.")
