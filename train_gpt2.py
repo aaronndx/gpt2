@@ -340,7 +340,7 @@ def restore_rng_state(rng_state, device_type):
         torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
     # Note: torch.mps.set_rng_state() is not yet implemented
 
-def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None, ckpt_dir=None, rank=0, master_process=True):
+def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None, ckpt_dir=None, rank=0, master_process=True, strip_ddp_prefix=False):
     """
     Loads a training checkpoint from either the Hugging Face Hub or a local directory.
 
@@ -386,12 +386,13 @@ def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None,
     # The '.get()' method is used for safe key access in case a key is missing
     if 'model' in checkpoint:
         print("Restoring model state...")
-        # This handles cases where the model was saved with DDP wrapping
-        state_dict = checkpoint['model']
-        unwanted_prefix = '_orig_mod.'
-        for k, v in list(state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        if strip_ddp_prefix:
+            # This handles cases where the model was saved with DDP wrapping, but wants to load without DDP
+            state_dict = checkpoint['model']
+            unwanted_prefix = '_orig_mod.'
+            for k, v in list(state_dict.items()):
+                if k.startswith(unwanted_prefix):
+                    state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
         model.load_state_dict(state_dict)
     
     # Restore optimizer state
