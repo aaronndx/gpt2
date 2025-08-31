@@ -92,6 +92,16 @@ class GPT2Config:
     n_head: int = 12
     n_embd: int = 768
 
+def tag_from_config(config: GPT2Config):
+    n_params = {
+        # n_params from d_model(n_embd)
+        768: '125M',
+        1024: '350M',
+        1536: '760M',
+        2048: '1300M'
+    }[config.n_embd]
+    return f"{n_params}_ctx{config.context_size}"
+
 class GPT2(nn.Module):
     def __init__(self, config: GPT2Config):
         super(GPT2, self).__init__()
@@ -356,10 +366,10 @@ def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None,
         raise ValueError("Must provide either a repo_id or a ckpt_dir.")
 
     is_ddp = dist.is_initialized()
-    if master_process:
-        print(f"Downloading checkpoint '{filename}' from '{repo_id}'...")
 
     if repo_id:
+        if master_process:
+            print(f"Downloading checkpoint '{filename}' from '{repo_id}'...")
         ckpt_path_obj = [None] # Use a list to broadcast
         # Download the checkpoint file from the Hub, which caches it locally
         if rank == 0:
@@ -466,7 +476,7 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
+def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, context_size=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
     from torch.nn.parallel import DistributedDataParallel as DDP
     from huggingface_hub import HfApi
@@ -511,7 +521,8 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
     scaler = torch.amp.GradScaler(enabled=(use_amp and device == 'cuda'))
 
     # create model
-    model = GPT2(GPT2Config(vocab_size=50304)) # Use nice number with power of 2 (128)
+    config = GPT2Config(vocab_size=50304, context_size=context_size) # For vocab_size, use nice number with power of 2 (128)
+    model = GPT2(config)
     model.to(device)
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=False)
@@ -666,7 +677,7 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
                         f.write(f"{step} eval {eval_loss_accum.item():.4f}\n")
                 step_to_save = step_count % save_ckpt_every == 0 or last_step
                 if (save_ckpt_dir or save_repo_id) and step_to_save:
-                    ckpt_name = f"{run_name}_ckpt_{step_count:05d}.pt"
+                    ckpt_name = f"{run_name}_ckpt_{tag_from_config(config)}_step{step_count:05d}.pt"
                     checkpoint = {
                         'model': raw_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
@@ -715,7 +726,7 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data_dir="edu_fineweb10B", steps=123, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False,
-                            eval_with_hellaswag=False, restore_repo_id='aaronndx/gpt2_checkpoints', save_ckpt_dir='log',
-                            restore_from_ckpt_filename='gpt2_aug_30_step_0100.bin', save_ckpt_every=10) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+    model = efficient_train(device, data_dir="edu_fineweb10B", steps=123, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=True,
+                            eval_with_hellaswag=False, restore_ckpt_dir='log/run_20250831_134704/', save_ckpt_dir='log',
+                            restore_from_ckpt_filename='run_20250831_134704_ckpt_125M_ctx1024_00110.pt', save_ckpt_every=1000) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
