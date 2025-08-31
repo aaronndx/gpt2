@@ -476,7 +476,7 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, context_size=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
+def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, context_size=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=None, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
     from torch.nn.parallel import DistributedDataParallel as DDP
     from huggingface_hub import HfApi
@@ -534,6 +534,8 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, cont
                 pass
         else:
             print("No log directory provided. Logs and checkpoints will not be saved.")
+        if save_ckpt_every:
+            assert save_ckpt_every % eval_every == 0, f"save_ckpt_every({save_ckpt_every}) must be dividable by eval_every({eval_every})"
         if save_ckpt_dir and save_repo_id:
             print(f"Warning: both save_ckpt_dir and save_repo_id is provided. Pick huggingface repo.")
         if restore_ckpt_dir and restore_repo_id:
@@ -677,7 +679,9 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, cont
                 if log_dir is not None:
                     with open(log_file, "a") as f:
                         f.write(f"{step} eval {eval_loss_accum.item():.4f}\n")
-                step_to_save = step_count % save_ckpt_every == 0 or last_step
+                step_to_save = last_step
+                if save_ckpt_every:
+                    step_to_save = step_to_save or step_count % save_ckpt_every == 0
                 if (save_ckpt_dir or save_repo_id) and step_to_save:
                     ckpt_name = f"{run_name}_ckpt_{tag_from_config(config)}_step{step_count:05d}.pt"
                     checkpoint = {
