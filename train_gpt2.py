@@ -386,9 +386,9 @@ def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None,
     # The '.get()' method is used for safe key access in case a key is missing
     if 'model' in checkpoint:
         print("Restoring model state...")
+        state_dict = checkpoint['model']
         if strip_ddp_prefix:
             # This handles cases where the model was saved with DDP wrapping, but wants to load without DDP
-            state_dict = checkpoint['model']
             unwanted_prefix = '_orig_mod.'
             for k, v in list(state_dict.items()):
                 if k.startswith(unwanted_prefix):
