@@ -596,69 +596,9 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
 
     for step in range(start_step, steps):
         t0 = time.time()
-        last_step = step == steps - 1
-        eval_step = step % eval_every == 0 or last_step
-
-        # eval using evaluation dataset
-        if eval_step:
-            model.eval()
-            eval_loader.reset()
-            with torch.no_grad():
-                eval_loss_accum = 0.0
-                eval_loss_steps = 20
-                for _ in range(eval_loss_steps):
-                    x, y = eval_loader.next_batch()
-                    x, y = x.to(device), y.to(device)
-                    with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
-                        _, loss = model(x, y)
-                    loss = loss / eval_loss_steps
-                    eval_loss_accum += loss.detach()
-            if ddp:
-                dist.all_reduce(eval_loss_accum, op=dist.ReduceOp.AVG)
-            if master_process:
-                print(f"Validation loss: {eval_loss_accum.item():.4f}")
-                if log_dir is not None:
-                    with open(log_file, "a") as f:
-                        f.write(f"{step} eval {eval_loss_accum.item():.4f}\n")
-                step_to_save = step > 0 and (step % save_ckpt_every == 0 or last_step)
-                if (save_ckpt_dir or save_repo_id) and step_to_save:
-                    ckpt_name = f"{run_name}_ckpt_{step:05d}.pt"
-                    checkpoint = {
-                        'model': raw_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'config': raw_model.config,
-                        'step': step,
-                        'val_loss': eval_loss_accum.item(),
-                        'scaler': scaler.state_dict(),
-                        'rng_state': save_rng_state(device)
-                    }
-                    if save_repo_id:
-                        api = HfApi()
-                        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmpfile:
-                            torch.save(checkpoint, tmpfile.name)
-                            # Upload the temporary file
-                            api.upload_file(
-                                path_or_fileobj=tmpfile.name,
-                                path_in_repo=ckpt_name,
-                                repo_id=save_repo_id,
-                                repo_type="model"
-                            )
-                        print(f"Saved checkpoint {ckpt_name} to HuggingFace repo {save_repo_id}")
-                        os.remove(tmpfile.name) # Clean up the temporary file    
-                    else:
-                        os.makedirs(save_ckpt_dir, exist_ok=True)
-                        ckpt_path = os.path.join(log_dir, ckpt_name)
-                        torch.save(checkpoint, ckpt_path)
-                        print(f"Saved checkpoint {ckpt_name} to {ckpt_path}")
-        
-        # eval using hellaswag
-        if eval_with_hellaswag and eval_step:
-            acc_norm, num_correct, num_total = hellaswag_eval.evaluate_ddp(model=model, device=device, rank=ddp_rank, world_size=ddp_world_size, compile=False, print_first=0)
-            if master_process:
-                print(f"HellaSwag accuracy: {num_correct}/{num_total}={acc_norm:.4f}")
-                if log_dir is not None:
-                    with open(log_file, "a") as f:
-                        f.write(f"{step} hella {acc_norm:.4f}\n")
+        step_count = step + 1 # This is the number of steps until now, used for {eval|save}_every calculation
+        last_step = step_count == steps
+        eval_step = step_count % eval_every == 0 or last_step
 
         model.train()
         optimizer.zero_grad()
@@ -702,6 +642,67 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
                 with open(log_file, "a") as f:
                     f.write(f"{step} train {loss_accum.item():.4f}\n")
 
+        # eval using evaluation dataset
+        if eval_step:
+            model.eval()
+            eval_loader.reset()
+            with torch.no_grad():
+                eval_loss_accum = 0.0
+                eval_loss_steps = 20
+                for _ in range(eval_loss_steps):
+                    x, y = eval_loader.next_batch()
+                    x, y = x.to(device), y.to(device)
+                    with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
+                        _, loss = model(x, y)
+                    loss = loss / eval_loss_steps
+                    eval_loss_accum += loss.detach()
+            if ddp:
+                dist.all_reduce(eval_loss_accum, op=dist.ReduceOp.AVG)
+            if master_process:
+                print(f"Validation loss: {eval_loss_accum.item():.4f}")
+                if log_dir is not None:
+                    with open(log_file, "a") as f:
+                        f.write(f"{step} eval {eval_loss_accum.item():.4f}\n")
+                step_to_save = step_count % save_ckpt_every == 0 or last_step
+                if (save_ckpt_dir or save_repo_id) and step_to_save:
+                    ckpt_name = f"{run_name}_ckpt_{step_count:05d}.pt"
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'config': raw_model.config,
+                        'step': step_count,
+                        'val_loss': eval_loss_accum.item(),
+                        'scaler': scaler.state_dict(),
+                        'rng_state': save_rng_state(device)
+                    }
+                    if save_repo_id:
+                        api = HfApi()
+                        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmpfile:
+                            torch.save(checkpoint, tmpfile.name)
+                            # Upload the temporary file
+                            api.upload_file(
+                                path_or_fileobj=tmpfile.name,
+                                path_in_repo=ckpt_name,
+                                repo_id=save_repo_id,
+                                repo_type="model"
+                            )
+                        print(f"Saved checkpoint {ckpt_name} to HuggingFace repo {save_repo_id}")
+                        os.remove(tmpfile.name) # Clean up the temporary file    
+                    else:
+                        os.makedirs(save_ckpt_dir, exist_ok=True)
+                        ckpt_path = os.path.join(log_dir, ckpt_name)
+                        torch.save(checkpoint, ckpt_path)
+                        print(f"Saved checkpoint {ckpt_name} to {ckpt_path}")
+        
+        # eval using hellaswag
+        if eval_with_hellaswag and eval_step:
+            acc_norm, num_correct, num_total = hellaswag_eval.evaluate_ddp(model=model, device=device, rank=ddp_rank, world_size=ddp_world_size, compile=False, print_first=0)
+            if master_process:
+                print(f"HellaSwag accuracy: {num_correct}/{num_total}={acc_norm:.4f}")
+                if log_dir is not None:
+                    with open(log_file, "a") as f:
+                        f.write(f"{step} hella {acc_norm:.4f}\n")
+
     if ddp:
         destroy_process_group()
     return model
@@ -713,5 +714,7 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data_dir="edu_fineweb10B", steps=500, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=False, restore_repo_id='aaronndx/gpt2_checkpoints', save_ckpt_dir='log', restore_from_ckpt_filename='gpt2_aug_30_step_0100.bin') # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+    model = efficient_train(device, data_dir="edu_fineweb10B", steps=123, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False,
+                            eval_with_hellaswag=False, restore_repo_id='aaronndx/gpt2_checkpoints', save_ckpt_dir='log',
+                            restore_from_ckpt_filename='gpt2_aug_30_step_0100.bin', save_ckpt_every=10) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
