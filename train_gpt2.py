@@ -6,6 +6,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import torch.distributed as dist
 import tiktoken
 import inspect
 import numpy as np
@@ -338,6 +339,81 @@ def restore_rng_state(rng_state, device_type):
         torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
     # Note: torch.mps.set_rng_state() is not yet implemented
 
+def restore_checkpoint_from_hf(repo_id, filename, model, optimizer, scaler, device, rank=0, master_process=True):
+    """
+    Downloads and loads a training checkpoint from the Hugging Face Hub.
+
+    Args:
+        repo_id (str): The ID of the repository (e.g., "username/repo-name").
+        filename (str): The name of the checkpoint file in the repository.
+        model (torch.nn.Module): The model to load the state into.
+        optimizer (torch.optim.Optimizer): The optimizer to load the state into.
+        scaler (torch.cuda.amp.GradScaler): The GradScaler to load the state into.
+        device (str): The device type ('cuda', 'cpu') for RNG state restoration.
+        rank, master_process: DDP related config
+
+    Returns:
+        dict: A dictionary containing metadata like 'step' and 'val_loss'.
+    """
+    from huggingface_hub import hf_hub_download
+
+    is_ddp = dist.is_initialized()
+    if master_process:
+        print(f"Downloading checkpoint '{filename}' from '{repo_id}'...")
+
+    ckpt_path_obj = [None] # Use a list to broadcast
+    # Download the checkpoint file from the Hub, which caches it locally
+    if rank == 0:
+        try:
+            ckpt_path = hf_hub_download(repo_id=repo_id, filename=filename)
+            ckpt_path_obj[0] = ckpt_path
+        except Exception as e:
+            print(f"Error downloading checkpoint: {e}")
+            return None
+
+    if master_process:
+        print(f"Checkpoint downloaded to: {ckpt_path}")
+    
+    if is_ddp:
+        dist.broadcast_object_list(ckpt_path_obj, src=0)
+    ckpt_path = ckpt_path_obj[0]
+
+    # Load the checkpoint onto the CPU first to avoid GPU memory issues
+    checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False) # To load self-created checkpoints
+    
+    # Restore model state
+    # The '.get()' method is used for safe key access in case a key is missing
+    if 'model' in checkpoint:
+        print("Restoring model state...")
+        # This handles cases where the model was saved with DDP wrapping
+        state_dict = checkpoint['model']
+        unwanted_prefix = '_orig_mod.'
+        for k, v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        model.load_state_dict(state_dict)
+    
+    # Restore optimizer state
+    if 'optimizer' in checkpoint and optimizer is not None:
+        print("Restoring optimizer state...")
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        
+    # Restore GradScaler state
+    if 'scaler' in checkpoint and scaler is not None:
+        print("Restoring GradScaler state...")
+        scaler.load_state_dict(checkpoint['scaler'])
+        
+    # Restore RNG state
+    if 'rng_state' in checkpoint:
+        print("Restoring RNG state...")
+        restore_rng_state(checkpoint['rng_state'], device_type=device)
+    
+    step = checkpoint.get('step', 0)
+    val_loss = checkpoint.get('val_loss', float('inf'))
+    print(f"✅ Checkpoint loaded. Resuming from step {step} with val_loss {val_loss:.4f}")
+    
+    return {'step': step, 'val_loss': val_loss}
+
 def get_training_precision(device):
     """
     Gets the appropriate training precision strategy according to device.
@@ -388,9 +464,8 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, save_checkpoint_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
+def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, checkpoint_repo_id=None, restore_from_checkpoint_filename=None, save_checkpoint_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
-    import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -424,22 +499,6 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
 
     if eval_with_hellaswag:
         hellaswag_eval = HellaSwagEval()
-
-    if data_dir is not None and data_repo_id is not None:
-        raise ValueError("Please provide either data_dir or repo_id, not both.")
-
-    if data_dir is not None:
-        # Load from local disk
-        if master_process: print(f"Loading data from local directory: {data_dir}")
-        train_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
-        eval_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
-    elif data_repo_id is not None:
-        # Load from Hugging Face Hub
-        if master_process: print(f"Loading data from Hugging Face repo: {data_repo_id}")
-        train_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process)
-        eval_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
-    else:
-        raise ValueError("Please provide a data source via data_dir or repo_id.")
 
     use_amp, amp_dtype = get_training_precision(device)
     if use_amp:
@@ -506,7 +565,28 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = raw_model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
 
-    for step in range(steps):
+    start_step = 0
+    if checkpoint_repo_id is not None and restore_from_checkpoint_filename is not None:
+        ckpt_meta = restore_checkpoint_from_hf(checkpoint_repo_id, restore_from_checkpoint_filename, raw_model, optimizer, scaler, device, ddp_rank, master_process)
+        start_step = ckpt_meta['step']
+    
+    if data_dir is not None and data_repo_id is not None:
+        raise ValueError("Please provide either data_dir or repo_id, not both.")
+
+    if data_dir is not None:
+        # Load from local disk
+        if master_process: print(f"Loading data from local directory: {data_dir}")
+        train_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process, start_step=start_step)
+        eval_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
+    elif data_repo_id is not None:
+        # Load from Hugging Face Hub
+        if master_process: print(f"Loading data from Hugging Face repo: {data_repo_id}")
+        train_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process, start_step=start_step)
+        eval_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
+    else:
+        raise ValueError("Please provide a data source via data_dir or repo_id.")
+
+    for step in range(start_step, steps):
         t0 = time.time()
         last_step = step == steps - 1
         eval_step = step % eval_every == 0 or last_step
@@ -609,5 +689,5 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=False) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=False, checkpoint_repo_id='aaronndx/gpt2_checkpoints', restore_from_checkpoint_filename='gpt2_aug_30_step_0100.bin') # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)

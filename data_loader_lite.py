@@ -8,17 +8,17 @@ class DataLoaderLite:
     Base class for loading data shards. It handles batching, process distribution,
     and shard rollover. Subclasses must implement the _load_tokens method.
     """
-    def __init__(self, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=None):
+    def __init__(self, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0):
         self.B = B  # Batch size
         self.T = T  # Sequence length
         self.process_rank = process_rank
         self.num_processes = num_processes
         self.split = split
         assert split in {'train', 'val'}
-        self.tokens_per_shard = 1e8 # 100M tokens for each shard, expect the final one.
+        self.tokens_per_shard = 100_000_000 # 100M tokens for each shard, expect the final one.
         self.start_step = start_step
-        if self.start_step is not None:
-            assert split is 'train', "Evaluation data loading doesn't support restoring from step."
+        if self.start_step > 0:
+            assert split == 'train', "Evaluation data loading doesn't support restoring from step."
             self.total_token_size = self.tokens_per_shard * 98 + 53989344 # The real total token count for training data.
         self.master_process = master_process
 
@@ -41,7 +41,7 @@ class DataLoaderLite:
         This won't restore state to exactly the position of the last training, since we skip some data
         at end of shards, and those are not calculated here. Though that should not impact result too much.
         """
-        if self.start_step is not None:
+        if self.start_step > 0:
             tokens_per_step = self.B * self.T * self.num_processes
             tokens_to_skip = self.start_step * tokens_per_step
             tokens_to_skip_cur_epoch = tokens_to_skip % self.total_token_size
@@ -82,7 +82,7 @@ class DataLoaderDisk(DataLoaderLite):
     """
     Loads tokenized data shards from a local disk directory.
     """
-    def __init__(self, dir, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=None):
+    def __init__(self, dir, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0):
         super().__init__(B, T, process_rank, num_processes, split, master_process, start_step)
         
         # List and sort the shard files from the directory
@@ -115,7 +115,7 @@ class DataLoaderHuggingFace(DataLoaderLite):
     Streams tokenized data shards from a Hugging Face Hub repository.
     To use this, needs to first login to hugging face by `huggingface-cli login`
     """
-    def __init__(self, repo_id, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=None):
+    def __init__(self, repo_id, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0):
         super().__init__(B, T, process_rank, num_processes, split, master_process, start_step)
         self.repo_id = repo_id
         
