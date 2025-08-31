@@ -11,6 +11,7 @@ import tiktoken
 import inspect
 import numpy as np
 import os
+import tempfile
 from hellaswag import HellaSwagEval
 from data_loader_lite import DataLoaderDisk, DataLoaderHuggingFace
 
@@ -339,44 +340,44 @@ def restore_rng_state(rng_state, device_type):
         torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
     # Note: torch.mps.set_rng_state() is not yet implemented
 
-def restore_checkpoint_from_hf(repo_id, filename, model, optimizer, scaler, device, rank=0, master_process=True):
+def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None, ckpt_dir=None, rank=0, master_process=True):
     """
-    Downloads and loads a training checkpoint from the Hugging Face Hub.
+    Loads a training checkpoint from either the Hugging Face Hub or a local directory.
 
     Args:
-        repo_id (str): The ID of the repository (e.g., "username/repo-name").
-        filename (str): The name of the checkpoint file in the repository.
-        model (torch.nn.Module): The model to load the state into.
-        optimizer (torch.optim.Optimizer): The optimizer to load the state into.
-        scaler (torch.cuda.amp.GradScaler): The GradScaler to load the state into.
-        device (str): The device type ('cuda', 'cpu') for RNG state restoration.
-        rank, master_process: DDP related config
-
-    Returns:
-        dict: A dictionary containing metadata like 'step' and 'val_loss'.
+        model, optimizer, scaler, device: Standard training objects.
+        filename (str): The name of the checkpoint file.
+        repo_id (str, optional): The ID of the Hugging Face repo. Defaults to None.
+        ckpt_dir (str, optional): The path to a local directory. Defaults to None.
     """
     from huggingface_hub import hf_hub_download
+
+    if not repo_id and not ckpt_dir:
+        raise ValueError("Must provide either a repo_id or a ckpt_dir.")
 
     is_ddp = dist.is_initialized()
     if master_process:
         print(f"Downloading checkpoint '{filename}' from '{repo_id}'...")
 
-    ckpt_path_obj = [None] # Use a list to broadcast
-    # Download the checkpoint file from the Hub, which caches it locally
-    if rank == 0:
-        try:
-            ckpt_path = hf_hub_download(repo_id=repo_id, filename=filename)
-            ckpt_path_obj[0] = ckpt_path
-        except Exception as e:
-            print(f"Error downloading checkpoint: {e}")
-            return None
-
-    if master_process:
-        print(f"Checkpoint downloaded to: {ckpt_path}")
-    
-    if is_ddp:
-        dist.broadcast_object_list(ckpt_path_obj, src=0)
-    ckpt_path = ckpt_path_obj[0]
+    if repo_id:
+        ckpt_path_obj = [None] # Use a list to broadcast
+        # Download the checkpoint file from the Hub, which caches it locally
+        if rank == 0:
+            try:
+                ckpt_path = hf_hub_download(repo_id=repo_id, filename=filename)
+                ckpt_path_obj[0] = ckpt_path
+            except Exception as e:
+                print(f"Error downloading checkpoint: {e}")
+                return None
+        if master_process:
+            print(f"Checkpoint downloaded to: {ckpt_path}")
+        if is_ddp:
+            dist.broadcast_object_list(ckpt_path_obj, src=0)
+        ckpt_path = ckpt_path_obj[0]
+    else:
+        ckpt_path = os.path.join(ckpt_dir, filename)
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint file not found at {ckpt_path}")
 
     # Load the checkpoint onto the CPU first to avoid GPU memory issues
     checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False) # To load self-created checkpoints
@@ -464,9 +465,10 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
-def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, checkpoint_repo_id=None, restore_from_checkpoint_filename=None, save_checkpoint_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
+def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=100, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
     from torch.nn.parallel import DistributedDataParallel as DDP
+    from huggingface_hub import HfApi
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"run_{timestamp}"
@@ -526,6 +528,12 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
                 pass
         else:
             print("No log directory provided. Logs and checkpoints will not be saved.")
+        if save_ckpt_dir and save_repo_id:
+            print(f"Warning: both save_ckpt_dir and save_repo_id is provided. Pick huggingface repo.")
+        if restore_ckpt_dir and restore_repo_id:
+            print(f"Warning: both restore_ckpt_dir and restore_repo_id is provided. Pick huggingface repo.")
+        if not restore_ckpt_dir and not restore_repo_id and restore_from_ckpt_filename:
+            raise ValueError("Restore-from filename must be provided with a restore-from location (restore_ckpt_dir / restore_repo_id).")
 
     max_lr = 6e-4 * (3 if fast_learning else 1)
     min_lr = max_lr * 0.1
@@ -566,8 +574,8 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
     optimizer = raw_model.configure_optimizers(device=device, learning_rate=max_lr, betas=(0.9, 0.95), eps=1e-8)
 
     start_step = 0
-    if checkpoint_repo_id is not None and restore_from_checkpoint_filename is not None:
-        ckpt_meta = restore_checkpoint_from_hf(checkpoint_repo_id, restore_from_checkpoint_filename, raw_model, optimizer, scaler, device, ddp_rank, master_process)
+    if (restore_ckpt_dir or restore_repo_id) and restore_from_ckpt_filename:
+        ckpt_meta = restore_checkpoint(restore_from_ckpt_filename, raw_model, optimizer, scaler, device, repo_id=restore_repo_id, ckpt_dir=restore_ckpt_dir, rank=ddp_rank, master_process=master_process)
         start_step = ckpt_meta['step']
     
     if data_dir is not None and data_repo_id is not None:
@@ -612,18 +620,34 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, step
                 if log_dir is not None:
                     with open(log_file, "a") as f:
                         f.write(f"{step} eval {eval_loss_accum.item():.4f}\n")
-                    if step > 0 and (step % save_checkpoint_every == 0 or last_step):
-                        ckpt_name = f"{run_name}_ckpt_{step:05d}.pt"
+                step_to_save = step > 0 and (step % save_ckpt_every == 0 or last_step)
+                if (save_ckpt_dir or save_repo_id) and step_to_save:
+                    ckpt_name = f"{run_name}_ckpt_{step:05d}.pt"
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'config': raw_model.config,
+                        'step': step,
+                        'val_loss': eval_loss_accum.item(),
+                        'scaler': scaler.state_dict(),
+                        'rng_state': save_rng_state(device)
+                    }
+                    if save_repo_id:
+                        api = HfApi()
+                        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmpfile:
+                            torch.save(checkpoint, tmpfile.name)
+                            # Upload the temporary file
+                            api.upload_file(
+                                path_or_fileobj=tmpfile.name,
+                                path_in_repo=ckpt_name,
+                                repo_id=save_repo_id,
+                                repo_type="model"
+                            )
+                        print(f"Saved checkpoint {ckpt_name} to HuggingFace repo {save_repo_id}")
+                        os.remove(tmpfile.name) # Clean up the temporary file    
+                    else:
+                        os.makedirs(save_ckpt_dir, exist_ok=True)
                         ckpt_path = os.path.join(log_dir, ckpt_name)
-                        checkpoint = {
-                            'model': raw_model.state_dict(),
-                            'optimizer': optimizer.state_dict(),
-                            'config': raw_model.config,
-                            'step': step,
-                            'val_loss': eval_loss_accum.item(),
-                            'scaler': scaler.state_dict(),
-                            'rng_state': save_rng_state(device)
-                        }
                         torch.save(checkpoint, ckpt_path)
                         print(f"Saved checkpoint {ckpt_name} to {ckpt_path}")
         
@@ -689,5 +713,5 @@ if __name__ == "__main__":
     # device = "cpu" # override to cpu until cuda is available. MPS does not work well with pytorch, especially for training.
     print(f"Using device: {device}")
 
-    model = efficient_train(device, data_dir="edu_fineweb10B", steps=50, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=False, checkpoint_repo_id='aaronndx/gpt2_checkpoints', restore_from_checkpoint_filename='gpt2_aug_30_step_0100.bin') # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+    model = efficient_train(device, data_dir="edu_fineweb10B", steps=500, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=False, eval_with_hellaswag=False, restore_repo_id='aaronndx/gpt2_checkpoints', save_ckpt_dir='log', restore_from_ckpt_filename='gpt2_aug_30_step_0100.bin') # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
