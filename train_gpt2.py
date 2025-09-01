@@ -12,6 +12,8 @@ import inspect
 import numpy as np
 import os
 import tempfile
+from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
+from huggingface_hub import HfApi
 from hellaswag import HellaSwagEval
 from data_loader_lite import DataLoaderDisk, DataLoaderHuggingFace
 
@@ -476,10 +478,83 @@ def simple_train(device, data=None, steps=50, B=4, T=32):
         print(f"Step {i+1}/{steps}, Loss: {loss.item()}")
     return model
 
+def verify_hf_login():
+    """
+    Verifies that the user is logged into Hugging Face Hub.
+
+    Returns:
+        bool: True if logged in, False otherwise.
+    """
+
+    print("Verifying Hugging Face login status...")
+    api = HfApi()
+    try:
+        user_info = api.whoami()
+        print(f"✅ Successfully logged in as '{user_info['name']}'.")
+        return True
+    except HfHubHTTPError as e:
+        # This error is raised for authentication issues (e.g., 401 Unauthorized)
+        print("❌ Login verification failed. You are not logged in.")
+        print("Please log in using 'huggingface-cli login' or 'notebook_login()' in your terminal or notebook.")
+        return False
+
+def verify_hf_repo_access(repo_id: str, check_can_write=False):
+    """
+    Verifies that the user is logged in and has write access to a specific repo.
+
+    Args:
+        repo_id (str): The ID of the repository to check (e.g., "username/repo-name").
+        check_can_write (bool): If to check write access. If false, check read access only.
+
+    Returns:
+        bool: True if logged in with write access, False otherwise.
+    """
+    import io
+    import uuid
+    print(f"Verifying access to Hugging Face repo: {repo_id}...")
+    api = HfApi()
+    try:
+        repo_info = api.repo_info(repo_id=repo_id) # This checks read permission
+        print(f"✅ Verified read permissions for '{repo_id}'.")
+        
+        if check_can_write:
+            # Check if the logged-in user has write permissions
+            # There is no way to directly check write permission,
+            # so upload and delete a file to test.
+            test_filename = f".write_access_test_{uuid.uuid4()}.tmp"
+            empty_file = io.BytesIO(b"")
+            api.upload_file(
+                path_or_fileobj=empty_file,
+                path_in_repo=test_filename,
+                repo_id=repo_id
+            )
+            api.delete_file(
+                path_in_repo=test_filename,
+                repo_id=repo_id
+            )
+            print(f"✅ Verified write permissions for '{repo_id}'.")
+            return True
+            
+    except RepositoryNotFoundError:
+        print(f"❌ Error: The repository '{repo_id}' does not exist.")
+        return False
+        
+    except HfHubHTTPError as e:
+        print(f"❌ Login verification failed: {e}")
+        print("Please ensure you are logged in with 'huggingface-cli login' or 'notebook_login()'.")
+        return False
+
 def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, context_size=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=None, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
     from torch.nn.parallel import DistributedDataParallel as DDP
-    from huggingface_hub import HfApi
+
+    # If huggingface read/write necessary, check permission before training
+    if restore_repo_id:
+        assert verify_hf_login()
+        assert verify_hf_repo_access(restore_repo_id)
+    if save_repo_id:
+        assert verify_hf_login()
+        assert verify_hf_repo_access(save_repo_id, check_can_write=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"run_{timestamp}"
