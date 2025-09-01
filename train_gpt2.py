@@ -533,7 +533,6 @@ def verify_hf_repo_access(repo_id: str, check_can_write=False):
                 repo_id=repo_id
             )
             print(f"✅ Verified write permissions for '{repo_id}'.")
-            return True
             
     except RepositoryNotFoundError:
         print(f"❌ Error: The repository '{repo_id}' does not exist.")
@@ -543,6 +542,8 @@ def verify_hf_repo_access(repo_id: str, check_can_write=False):
         print(f"❌ Login verification failed: {e}")
         print("Please ensure you are logged in with 'huggingface-cli login' or 'notebook_login()'.")
         return False
+
+    return True
 
 def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, context_size=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=None, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
     from torch.distributed import init_process_group, destroy_process_group
@@ -808,6 +809,6 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     model = efficient_train(device, data_dir="edu_fineweb10B", steps=123, B=4, T=256, total_batch_size=4*256*2, log_dir="log", compile=True,
-                            eval_with_hellaswag=False, restore_ckpt_dir='log/run_20250831_134704/', save_ckpt_dir='log',
-                            restore_from_ckpt_filename='run_20250831_134704_ckpt_125M_ctx1024_00110.pt', save_ckpt_every=1000) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
+                            eval_with_hellaswag=False, restore_repo_id='aaronndx/gpt2_checkpoints', save_repo_id='aaronndx/gpt2_checkpoints',
+                            restore_from_ckpt_filename='gpt2_aug_30_step_0100.bin', save_ckpt_every=100) # total_batch_size = 2**19, ~0.5M tokens for GPT3 training
     simple_eval(device, max_length=100, input="They feast on wine and swan while our own tables see naught but the shadow of a crust", model=model)
