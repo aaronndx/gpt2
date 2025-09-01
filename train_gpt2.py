@@ -545,7 +545,7 @@ def verify_hf_repo_access(repo_id: str, check_can_write=False):
 
     return True
 
-def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, context_size=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=None, log_dir=None, eval_with_hellaswag=False, compile=False, fast_learning=False):
+def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, context_size=1024, steps=50, total_batch_size=None, eval_every=10, save_ckpt_dir=None, save_repo_id=None, restore_ckpt_dir=None, restore_repo_id=None, restore_from_ckpt_filename=None, save_ckpt_every=None, log_dir=None, eval_with_hellaswag=False, compile=False, learning_mode='normal'):
     from torch.distributed import init_process_group, destroy_process_group
     from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -619,11 +619,16 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, cont
         if not restore_ckpt_dir and not restore_repo_id and restore_from_ckpt_filename:
             raise ValueError("Restore-from filename must be provided with a restore-from location (restore_ckpt_dir / restore_repo_id).")
 
-    max_lr = 6e-4 * (3 if fast_learning else 1)
+    max_lr_multipliers = {
+        "normal": 1.0,
+        "fast": 2.0,
+        "very_fast": 3.0,
+    }
+    max_lr = 6e-4 * max_lr_multipliers[learning_mode]
     min_lr = max_lr * 0.1
     warmup_steps = 375e6 / total_batch_size # GPT-3 warm-up is 375M tokens
     if master_process:
-        param_log = f"max_lr: {max_lr}, min_lr: {min_lr}, steps: {steps}, warmup_steps: {warmup_steps}"
+        param_log = f"max_lr: {max_lr}, min_lr: {min_lr}, steps: {steps}, warmup_steps: {warmup_steps}\n"
         print(param_log)
         if log_dir is not None:
             with open(log_file, "a") as f:
