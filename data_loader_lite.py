@@ -22,7 +22,7 @@ class DataLoaderLite:
             self.total_token_size = self.tokens_per_shard * 98 + 53989344 # The real total token count for training data.
         if batch_size_per_step:
             # User can override tokens per step in cases like gradient accumulation,
-            # in which case a step consists of multiple micro steps each with size self.tokens_per_step
+            # in which case a step consists of multiple micro steps each with size B * T * num_processes
             self.tokens_per_step = batch_size_per_step
         else:
             self.tokens_per_step = self.B * self.T * self.num_processes
@@ -71,10 +71,10 @@ class DataLoaderLite:
         y = buf[1:].view(B, T)   # Target tokens
         
         # Advance the position in the current shard
-        self.current_position += self.tokens_per_step
+        self.current_position += B * T * self.num_processes
         
         # If the current shard is exhausted, move to the next one
-        if self.current_position + (self.tokens_per_step + 1) > len(self.tokens):
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = self._load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank
