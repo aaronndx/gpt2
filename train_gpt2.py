@@ -681,12 +681,12 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, cont
     if data_dir is not None:
         # Load from local disk
         if master_process: print(f"Loading data from local directory: {data_dir}")
-        train_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process, start_step=start_step)
+        train_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process, start_step=start_step, batch_size_per_step=total_batch_size)
         eval_loader = DataLoaderDisk(data_dir, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
     elif data_repo_id is not None:
         # Load from Hugging Face Hub
         if master_process: print(f"Loading data from Hugging Face repo: {data_repo_id}")
-        train_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process, start_step=start_step)
+        train_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train', master_process=master_process, start_step=start_step, batch_size_per_step=total_batch_size)
         eval_loader = DataLoaderHuggingFace(data_repo_id, B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val', master_process=master_process)
     else:
         raise ValueError("Please provide a data source via data_dir or repo_id.")

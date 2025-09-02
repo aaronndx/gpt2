@@ -8,7 +8,7 @@ class DataLoaderLite:
     Base class for loading data shards. It handles batching, process distribution,
     and shard rollover. Subclasses must implement the _load_tokens method.
     """
-    def __init__(self, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0):
+    def __init__(self, B, T, process_rank, num_processes, split, master_process, start_step, batch_size_per_step):
         self.B = B  # Batch size
         self.T = T  # Sequence length
         self.process_rank = process_rank
@@ -20,6 +20,12 @@ class DataLoaderLite:
         if self.start_step > 0:
             assert split == 'train', "Evaluation data loading doesn't support restoring from step."
             self.total_token_size = self.tokens_per_shard * 98 + 53989344 # The real total token count for training data.
+        if batch_size_per_step:
+            # User can override tokens per step in cases like gradient accumulation,
+            # in which case a step consists of multiple micro steps each with size self.tokens_per_step
+            self.tokens_per_step = batch_size_per_step
+        else:
+            self.tokens_per_step = self.B * self.T * self.num_processes
         self.master_process = master_process
 
         self.shards = []
@@ -42,8 +48,7 @@ class DataLoaderLite:
         at end of shards, and those are not calculated here. Though that should not impact result too much.
         """
         if self.start_step > 0:
-            tokens_per_step = self.B * self.T * self.num_processes
-            tokens_to_skip = self.start_step * tokens_per_step
+            tokens_to_skip = self.start_step * self.tokens_per_step
             tokens_to_skip_cur_epoch = tokens_to_skip % self.total_token_size
             self.current_shard = tokens_to_skip_cur_epoch // self.tokens_per_shard
             self.tokens = self._load_tokens(self.shards[self.current_shard])
@@ -66,10 +71,10 @@ class DataLoaderLite:
         y = buf[1:].view(B, T)   # Target tokens
         
         # Advance the position in the current shard
-        self.current_position += B * T * self.num_processes
+        self.current_position += self.tokens_per_step
         
         # If the current shard is exhausted, move to the next one
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+        if self.current_position + (self.tokens_per_step + 1) > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = self._load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank
@@ -82,8 +87,8 @@ class DataLoaderDisk(DataLoaderLite):
     """
     Loads tokenized data shards from a local disk directory.
     """
-    def __init__(self, dir, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0):
-        super().__init__(B, T, process_rank, num_processes, split, master_process, start_step)
+    def __init__(self, dir, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0, batch_size_per_step=None):
+        super().__init__(B, T, process_rank, num_processes, split, master_process, start_step, batch_size_per_step)
         
         # List and sort the shard files from the directory
         shards = os.listdir(dir)
@@ -115,8 +120,8 @@ class DataLoaderHuggingFace(DataLoaderLite):
     Streams tokenized data shards from a Hugging Face Hub repository.
     To use this, needs to first login to hugging face by `huggingface-cli login`
     """
-    def __init__(self, repo_id, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0):
-        super().__init__(B, T, process_rank, num_processes, split, master_process, start_step)
+    def __init__(self, repo_id, B, T, process_rank=0, num_processes=1, split='val', master_process=True, start_step=0, batch_size_per_step=None):
+        super().__init__(B, T, process_rank, num_processes, split, master_process, start_step, batch_size_per_step)
         self.repo_id = repo_id
         
         # Programmatically generate the shard filenames
