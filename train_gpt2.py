@@ -227,12 +227,20 @@ class GPT2(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps, **extra_args)
         return optimizer
 
-def simple_eval(device, input=None, model=None, batch_size=5, max_length=30):
+def simple_eval(device, input=None, model=None, from_pretrained=None, from_ckpt_filename=None, from_ckpt_dir=None, from_ckpt_repo_id=None, batch_size=5, max_length=30, context_size=1024):
     if input is None:
         input = "Hello, I'm a language model,"
 
     if model is None:
-        model = GPT2.from_pretrained('gpt2')
+        if from_pretrained:
+            model = GPT2.from_pretrained(from_pretrained)
+        elif from_ckpt_filename:
+            model = GPT2(GPT2Config(vocab_size=50304, context_size=context_size))
+            assert from_ckpt_dir or from_ckpt_repo_id, f"Needs to provide from_ckpt_dir or from_ckpt_repo_id with from_ckpt_filename"
+            restore_checkpoint(from_ckpt_filename, model, device, repo_id=from_ckpt_repo_id, ckpt_dir=from_ckpt_dir)
+        else:
+            raise ValueError("No model or weights sources provided.")
+
     model.eval()
     model.to(device)
     print("model loaded successfully!")
@@ -352,7 +360,7 @@ def restore_rng_state(rng_state, device_type):
         torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
     # Note: torch.mps.set_rng_state() is not yet implemented
 
-def restore_checkpoint(filename, model, optimizer, scaler, device, repo_id=None, ckpt_dir=None, rank=0, master_process=True, strip_compile_prefix=True):
+def restore_checkpoint(filename, model, device, optimizer=None, scaler=None, repo_id=None, ckpt_dir=None, rank=0, master_process=True, strip_compile_prefix=True):
     """
     Loads a training checkpoint from either the Hugging Face Hub or a local directory.
 
@@ -664,7 +672,7 @@ def efficient_train(device, data_dir=None, data_repo_id=None, B=16, T=1024, cont
 
     start_step = 0
     if (restore_ckpt_dir or restore_repo_id) and restore_from_ckpt_filename:
-        ckpt_meta = restore_checkpoint(restore_from_ckpt_filename, model, optimizer, scaler, device, repo_id=restore_repo_id, ckpt_dir=restore_ckpt_dir, rank=ddp_rank, master_process=master_process)
+        ckpt_meta = restore_checkpoint(restore_from_ckpt_filename, model, device, optimizer=optimizer, scaler=scaler, repo_id=restore_repo_id, ckpt_dir=restore_ckpt_dir, rank=ddp_rank, master_process=master_process)
         start_step = ckpt_meta['step']
     
     # DDP and compile should happen after restoring checkpoint
