@@ -4,7 +4,7 @@ This repository contains a from-scratch implementation of an optimized GPT-2 mod
 
 The project is focused on providing a clean, simple, and highly efficient framework for training and evaluating language models, incorporating modern performance optimizations and advanced training techniques inspired by the GPT-2 and GPT-3 papers.
 
-Besides original papers, this project also refers to lecture [Let's reproduce GPT-2 (124M)](https://www.youtube.com/watch?v=l8pRSuU81PU) by Andrej Karpathy for applying training optimizations.
+Besides original papers, this project is also based on the lecture [Let's reproduce GPT-2 (124M)](https://www.youtube.com/watch?v=l8pRSuU81PU) by Andrej Karpathy for initial components and applying training optimizations.
 
 ## Features
 
